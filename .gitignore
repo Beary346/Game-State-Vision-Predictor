@@ -1,0 +1,32 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Data (large files, not tracked)
+data/bronze/*
+data/silver/*
+data/gold/*
+!data/**/.gitkeep
+
+# Models
+models/*
+!models/.gitkeep
+
+# Outputs / artifacts
+outputs/*
+!outputs/.gitkeep
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/

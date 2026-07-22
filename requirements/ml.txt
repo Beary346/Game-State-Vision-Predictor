@@ -1,0 +1,4 @@
+-r base.txt
+scikit-learn>=1.3.0
+torch>=2.1.0
+xgboost>=2.0.0
