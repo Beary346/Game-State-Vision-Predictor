@@ -52,6 +52,6 @@ MLflow tests a wide variety of models to find the best fit. Trains a model using
 
 ## Rules
 - Write tests before implementation.
-- Write one document at a time and wait for my confirmation.
+- Every document, generate code module by module, answer clarification questions, and wait for confirmation before moving on.
 - Add comments on your code, prioritizing developer readability: concise docstrings, and descriptive variable names can replace the need for excessive inline comments.
 - Don't just log numbers: log correlation matrices, UMAP/t-SNE embeddings, and confusion matrices. Take advantage of jupyterlab, A Web UI (or notebook) for interactive, human-in-the-loop use. 
