@@ -1,0 +1,11 @@
+sample|task|predicted|target
+0|player_health|0.5848|0.4666
+0|attacking|0.6655|0.0000
+0|defending|0.6762|1.0000
+0|damage|0.4709|0.0000
+0|enemy_health_0|0.4428|0.4960
+1|player_health|0.5848|0.5267
+1|attacking|0.6655|1.0000
+1|defending|0.6762|1.0000
+1|damage|0.4709|0.0000
+1|enemy_health_0|0.4428|0.7207
