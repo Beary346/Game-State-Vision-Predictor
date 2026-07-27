@@ -19,17 +19,13 @@ from src.pipeline.bronze import (
     sharpen,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TEST_SCREENSHOT = str(PROJECT_ROOT / "data" / "bronze" / "test_screenshot.png")
-
-
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture(scope="session")
-def real_frame():
+def real_frame(test_screenshot_path):
     """Load the real test screenshot once per session."""
-    return load_image(TEST_SCREENSHOT)
+    return load_image(test_screenshot_path)
 
 
 @pytest.fixture
@@ -40,9 +36,9 @@ def blank_frame():
 # ── load_image ───────────────────────────────────────────────────────────────
 
 
-def test_load_image_from_disk():
+def test_load_image_from_disk(test_screenshot_path):
     """Bronze must load a real screenshot successfully."""
-    img = load_image(TEST_SCREENSHOT)
+    img = load_image(test_screenshot_path)
     assert img.shape == (H, W, 3)
     assert img.dtype == np.uint8
 
@@ -129,13 +125,13 @@ class TestMetadata:
 
 
 class TestProcessImage:
-    def test_process_image_saves_artifacts(self, tmp_path):
-        result = process_image(TEST_SCREENSHOT, str(tmp_path))
+    def test_process_image_saves_artifacts(self, tmp_path, test_screenshot_path):
+        result = process_image(test_screenshot_path, str(tmp_path))
         assert Path(result["preprocessed"]).exists()
         assert Path(result["metadata"]).exists()
 
-    def test_metadata_json_is_valid(self, tmp_path):
-        result = process_image(TEST_SCREENSHOT, str(tmp_path))
+    def test_metadata_json_is_valid(self, tmp_path, test_screenshot_path):
+        result = process_image(test_screenshot_path, str(tmp_path))
         with open(result["metadata"]) as f:
             data = json.load(f)
         assert "mean_brightness" in data
@@ -143,8 +139,8 @@ class TestProcessImage:
         assert "contrast" in data
         assert "width" in data
 
-    def test_preprocessed_image_is_valid(self, tmp_path):
-        result = process_image(TEST_SCREENSHOT, str(tmp_path))
+    def test_preprocessed_image_is_valid(self, tmp_path, test_screenshot_path):
+        result = process_image(test_screenshot_path, str(tmp_path))
         img = cv2.imread(result["preprocessed"])
         assert img is not None
         assert img.shape == (H, W, 3)
