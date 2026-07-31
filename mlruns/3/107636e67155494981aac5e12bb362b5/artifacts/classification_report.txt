@@ -1,0 +1,9 @@
+              precision    recall  f1-score   support
+
+     winning      1.000     1.000     1.000         2
+      losing      1.000     1.000     1.000         2
+   stalemate      1.000     1.000     1.000         2
+
+    accuracy                          1.000         6
+   macro avg      1.000     1.000     1.000         6
+weighted avg      1.000     1.000     1.000         6

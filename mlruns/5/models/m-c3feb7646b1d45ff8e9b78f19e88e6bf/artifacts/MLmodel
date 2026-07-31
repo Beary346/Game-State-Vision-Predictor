@@ -1,0 +1,23 @@
+artifact_path: /mnt/c/Users/Ryan Craft/Documents/Coding/Game State Vision Predictor/mlruns/5/models/m-c3feb7646b1d45ff8e9b78f19e88e6bf/artifacts
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.14.4
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.9.0
+    skops_trusted_types: null
+mlflow_version: 3.14.0
+model_id: m-c3feb7646b1d45ff8e9b78f19e88e6bf
+model_size_bytes: 8819
+model_uuid: m-c3feb7646b1d45ff8e9b78f19e88e6bf
+prompts: null
+run_id: b66a0e657213409d986030c5b3976129
+utc_time_created: '2026-07-31 18:08:41.590017'
