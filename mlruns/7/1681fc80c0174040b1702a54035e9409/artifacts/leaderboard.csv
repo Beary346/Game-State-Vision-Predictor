@@ -1,0 +1,7 @@
+model_name,run_id,accuracy,macro_f1,weighted_f1,model_path
+random_forest,a1c75b4d0ea842729f61e2d7652a44ff,1.0,1.0,1.0,runs:/a1c75b4d0ea842729f61e2d7652a44ff/model
+gradient_boosting,f0ea1da1b97b4611a3faa6b6ae08b5ee,1.0,1.0,1.0,runs:/f0ea1da1b97b4611a3faa6b6ae08b5ee/model
+svc,61a10ee9e07040be8bf532e249188100,1.0,1.0,1.0,runs:/61a10ee9e07040be8bf532e249188100/model
+xgboost,a1a3aa2535f744b3aa683bd949ae9f46,1.0,1.0,1.0,runs:/a1a3aa2535f744b3aa683bd949ae9f46/model
+logistic_regression,52aad49bed91419fb1a65cbca24b05c6,0.8333333333333334,0.8222222222222223,0.8222222222222223,runs:/52aad49bed91419fb1a65cbca24b05c6/model
+pytorch_mlp,695bb0db4ade4135aa91cda4dad1bd38,0.3333333333333333,0.16666666666666666,0.16666666666666666,runs:/695bb0db4ade4135aa91cda4dad1bd38/model
