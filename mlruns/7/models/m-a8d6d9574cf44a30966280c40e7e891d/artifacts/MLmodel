@@ -1,0 +1,23 @@
+artifact_path: /mnt/c/Users/Ryan Craft/Documents/Coding/Game State Vision Predictor/mlruns/7/models/m-a8d6d9574cf44a30966280c40e7e891d/artifacts
+flavors:
+  python_function:
+    config:
+      device: null
+    data: data
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.pytorch
+    pickle_module_name: mlflow.pytorch.pickle_module
+    python_version: 3.14.4
+  pytorch:
+    code: null
+    model_data: data
+    pytorch_version: 2.13.0+cu130
+mlflow_version: 3.14.0
+model_id: m-a8d6d9574cf44a30966280c40e7e891d
+model_size_bytes: 17683571
+model_uuid: m-a8d6d9574cf44a30966280c40e7e891d
+prompts: null
+run_id: 2fc7b7422b364344a6ce45b28a4d6bd1
+utc_time_created: '2026-08-05 20:30:57.107835'

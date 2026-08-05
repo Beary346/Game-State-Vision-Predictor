@@ -5,18 +5,25 @@ import cv2
 import numpy as np
 import pytest
 
-from src.pipeline.bronze import (
+from src.ingestor_bronze import (
+    MAX_VOD_DURATION_SEC,
     BronzeFeatures,
     H,
+    VodMetadata,
     W,
     denoise,
     enhance_contrast,
+    extract_frames,
     extract_metadata,
+    get_vod_info,
     load_image,
     preprocess,
     process_image,
+    process_input,
+    process_vod,
     save_image,
     sharpen,
+    validate_vod_duration,
 )
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -31,6 +38,52 @@ def real_frame(test_screenshot_path):
 @pytest.fixture
 def blank_frame():
     return np.zeros((H, W, 3), dtype=np.uint8)
+
+
+@pytest.fixture
+def sample_vod(tmp_path):
+    """Create a short synthetic VOD for testing."""
+    vod_path = tmp_path / "test_vod.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    fps = 30.0
+    out = cv2.VideoWriter(str(vod_path), fourcc, fps, (W, H))
+
+    for i in range(90):
+        frame = np.zeros((H, W, 3), dtype=np.uint8)
+        cv2.putText(
+            frame,
+            f"Frame {i}",
+            (100, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            2,
+            (255, 255, 255),
+            3,
+        )
+        out.write(frame)
+    out.release()
+    return str(vod_path)
+
+
+@pytest.fixture
+def long_vod(tmp_path):
+    """Create a VOD that exceeds MAX_VOD_DURATION_SEC.
+
+    Tiny 64x48 frames keep encoding cheap: the duration contract is
+    (frame_count / fps) and is independent of resolution, so this fixture
+    builds ~27k frames in well under a second instead of minutes.
+    """
+    vod_path = tmp_path / "long_vod.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    fps = 30.0
+    duration_sec = MAX_VOD_DURATION_SEC + 10
+    total_frames = int(duration_sec * fps)
+    out = cv2.VideoWriter(str(vod_path), fourcc, fps, (64, 48))
+
+    for i in range(total_frames):
+        frame = np.zeros((48, 64, 3), dtype=np.uint8)
+        out.write(frame)
+    out.release()
+    return str(vod_path)
 
 
 # ── load_image ───────────────────────────────────────────────────────────────
@@ -120,6 +173,11 @@ class TestMetadata:
         assert meta.std_brightness == 0.0
         assert meta.contrast == 0.0
 
+    def test_metadata_includes_frame_info(self, real_frame):
+        meta = extract_metadata(real_frame, frame_index=42, timestamp_sec=1.4)
+        assert meta.frame_index == 42
+        assert meta.timestamp_sec == 1.4
+
 
 # ── process_image (end-to-end) ──────────────────────────────────────────────
 
@@ -148,6 +206,125 @@ class TestProcessImage:
     def test_process_image_missing_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             process_image(str(tmp_path / "nonexistent.png"), str(tmp_path / "out"))
+
+
+# ── VOD processing ───────────────────────────────────────────────────────────
+
+
+class TestVodProcessing:
+    def test_get_vod_info(self, sample_vod):
+        info = get_vod_info(sample_vod)
+        assert isinstance(info, VodMetadata)
+        assert info.fps == 30.0
+        assert info.total_frames == 90
+        assert info.duration_sec == pytest.approx(3.0, rel=0.1)
+        assert info.width == W
+        assert info.height == H
+
+    def test_validate_vod_duration_passes(self, sample_vod):
+        info = get_vod_info(sample_vod)
+        validate_vod_duration(info)
+
+    def test_validate_vod_duration_fails(self, long_vod):
+        info = get_vod_info(long_vod)
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            validate_vod_duration(info)
+
+    def test_extract_frames_default_interval(self, sample_vod, tmp_path):
+        frames = extract_frames(sample_vod, str(tmp_path))
+        assert len(frames) == 90
+        for i, frame in enumerate(frames):
+            assert frame["frame_index"] == i
+            assert Path(frame["image_path"]).exists()
+
+    def test_extract_frames_custom_interval(self, sample_vod, tmp_path):
+        frames = extract_frames(sample_vod, str(tmp_path), frame_interval=30)
+        assert len(frames) == 3
+        assert frames[0]["frame_index"] == 0
+        assert frames[1]["frame_index"] == 30
+        assert frames[2]["frame_index"] == 60
+
+    def test_extract_frames_max_frames(self, sample_vod, tmp_path):
+        frames = extract_frames(sample_vod, str(tmp_path), max_frames=5)
+        assert len(frames) == 5
+
+    def test_extract_frames_resizes_to_target(self, sample_vod, tmp_path):
+        frames = extract_frames(sample_vod, str(tmp_path))
+        img = cv2.imread(frames[0]["image_path"])
+        assert img.shape[:2] == (H, W)
+
+    def test_process_vod_end_to_end(self, sample_vod, tmp_path):
+        result = process_vod(sample_vod, str(tmp_path), frame_interval=10)
+        assert "frames" in result
+        assert "vod_metadata" in result
+        assert len(result["frames"]) == 9
+        assert result["vod_metadata"]["extracted_frames"] == 9
+        assert Path(result["vod_metadata_path"]).exists()
+
+        for frame in result["frames"]:
+            assert Path(frame["preprocessed"]).exists()
+            assert Path(frame["metadata"]).exists()
+            with open(frame["metadata"]) as f:
+                meta = json.load(f)
+            assert "frame_index" in meta
+            assert "timestamp_sec" in meta
+
+    def test_process_vod_saves_vod_metadata(self, sample_vod, tmp_path):
+        result = process_vod(sample_vod, str(tmp_path), frame_interval=30)
+        with open(result["vod_metadata_path"]) as f:
+            vod_meta = json.load(f)
+        assert vod_meta["duration_sec"] == pytest.approx(3.0, rel=0.1)
+        assert vod_meta["fps"] == 30.0
+        assert vod_meta["total_frames"] == 90
+
+    def test_process_vod_max_frames(self, sample_vod, tmp_path):
+        result = process_vod(sample_vod, str(tmp_path), frame_interval=10, max_frames=4)
+        assert len(result["frames"]) == 4
+        assert result["vod_metadata"]["extracted_frames"] == 4
+
+    def test_process_vod_single_pass_no_raw_intermediates(self, sample_vod, tmp_path):
+        """Remake guarantee: no unprocessed raw frames left on disk."""
+        process_vod(sample_vod, str(tmp_path), frame_interval=30)
+        raw_leftovers = list(Path(tmp_path).glob("*_frame_*.png"))
+        assert raw_leftovers, "expected bronze frames to exist"
+        for leftover in raw_leftovers:
+            assert leftover.name.endswith("_bronze.png"), (
+                f"raw intermediate left behind: {leftover.name}"
+            )
+
+    def test_extract_frames_saves_raw_while_process_vod_preprocesses(self, sample_vod, tmp_path):
+        """extract_frames is raw; process_vod output must differ (preprocessed)."""
+        raw_dir = tmp_path / "raw"
+        bronze_dir = tmp_path / "bronze"
+        raw_frames = extract_frames(sample_vod, str(raw_dir), frame_interval=5)
+        bronze_frames = process_vod(sample_vod, str(bronze_dir), frame_interval=5)
+
+        raw_img = cv2.imread(raw_frames[0]["image_path"])
+        bronze_img = cv2.imread(bronze_frames["frames"][0]["preprocessed"])
+        diff = np.abs(raw_img.astype(np.int16) - bronze_img.astype(np.int16))
+        assert diff.mean() > 0.5, "process_vod output appears identical to raw extraction"
+
+
+# ── Unified process_input ────────────────────────────────────────────────────
+
+
+class TestProcessInput:
+    def test_process_input_image(self, test_screenshot_path, tmp_path):
+        result = process_input(test_screenshot_path, str(tmp_path))
+        assert "preprocessed" in result
+        assert "metadata" in result
+
+    def test_process_input_vod(self, sample_vod, tmp_path):
+        result = process_input(sample_vod, str(tmp_path), frame_interval=15)
+        assert "frames" in result
+        assert "vod_metadata" in result
+        assert len(result["frames"]) == 6
+
+    def test_process_input_invalid_extension(self, tmp_path):
+        fake = tmp_path / "file.xyz"
+        fake.write_text("not an image")
+        with pytest.raises(FileNotFoundError):
+            process_input(str(fake), str(tmp_path))
 
 
 # ── Round-trip save/load ────────────────────────────────────────────────────
