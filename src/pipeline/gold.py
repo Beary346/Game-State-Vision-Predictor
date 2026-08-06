@@ -242,7 +242,10 @@ def load_labeled_dataset(data_root: str) -> tuple[np.ndarray, np.ndarray, list[s
 
     Returns ``(X, y, stems)`` where ``X`` is the (n, 8) feature matrix and
     ``y`` holds integer labels 0..2 (indices into STATE_LABELS).
-    Raises ValueError naming any sample that has no label.
+
+    When *some* labels exist (in ``labels.csv`` or embedded), sample without a
+    label are skipped quietly — this is how real partial/skipped datasets train
+    on just the reviewed subset. It raises only when *no* labels exist at all.
     """
     root = Path(data_root)
     if not root.exists():
@@ -273,12 +276,13 @@ def load_labeled_dataset(data_root: str) -> tuple[np.ndarray, np.ndarray, list[s
             raise ValueError(f"Invalid label {label!r} for sample {stem!r} (expected one of {STATE_LABELS})")
         samples.append((data, stem, label))
 
-    if missing:
-        raise ValueError(
-            f"{len(missing)} sample(s) missing a label (add rows to labels.csv or a 'label' key): "
-            + ", ".join(missing[:5])
-        )
     if not samples:
+        if missing:
+            raise ValueError(
+                "no labeled samples found (unlabeled stems include "
+                + ", ".join(missing[:5])
+                + "): review + export labels.csv under the labeling tool"
+            )
         raise ValueError(f"No labeled samples found under {silver_dir}")
 
     X = np.stack([features_to_vector(data) for data, _, _ in samples]).astype(np.float32)

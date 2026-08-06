@@ -20,6 +20,7 @@ data/bronze/<stem>.png         # raw screenshots OR frames extracted from a VOD
 data/silver/<stem>_bronze.png  # Bronze-preprocessed frame (+ <stem>_bronze.json metadata)
 data/silver/<stem>_silver.json # Silver features (player_health, enemies, attacking, ...)
 data/gold/silver/*.json        # the same Silver features, pulled into the training set
+data/gold/labeling/<stem>_labeling.json  # your empty label scaffold (web tool fills it)
 data/gold/labels.csv           # stem,label  <- source of truth for Gold labels
 ```
 
@@ -71,6 +72,43 @@ python -m src.pipeline.gold --data-root data/gold --experiment gold_classifier
 
 `data/gold/` needs `silver/*.json` (auto-generated above) and `labels.csv`
 (ground truth). `--data-root data/gold` is what `train_and_compare()` uses.
+The loader only trains on rows present in `labels.csv` — unreviewed/skipped
+frames in `silver/` are skipped quietly, so you can train after labeling just
+the first batch (labeled earlier rows and keep going).
+
+### Label → Train, the whole loop
+
+This is the one diagram to remember. Each arrow is one command.
+
+```
+data/videos/*.mp4
+   │  ① bronze:  python -m src.pipeline.bronze --input <vid> --output data/silver --frame-interval <fps>
+   ▼
+data/silver/<stem>_frame_XXXX_bronze.png     (Bronze frames, ~1/sec)
+   │
+   │  ② silver:  python -c "from src.pipeline.silver import process_frames; \
+   │             process_frames('data/silver/', 'data/gold/silver')"
+   ▼
+data/gold/silver/<stem>_silver.json          (auto-read Silver features)
+   │  ③ scaffolds:  python -m src.pipeline.labeling --init
+   ▼
+data/gold/labeling/<stem>_labeling.json      (your empty per-frame scaffolds)
+   │
+   │  ④ label:  uvicorn app.labeler:app --port 8765  → http://127.0.0.1:8765
+   │              (see the frame, click winning/losing/stalemate or Skip →
+   │               answer is written straight back into the scaffold)
+   ▼
+   │  ⑤ export:  python -m src.pipeline.labeling --export
+   ▼
+data/gold/labels.csv                         (stem,label source of truth)
+   │  ⑥ train:  python -m src.pipeline.gold --data-root data/gold
+   ▼
+mlflow  →  gold_classifier leaderboard  →  promote the best model via
+           src/pipeline/model_registry.py  →  production state-reader
+```
+
+Steps ③→⑥ repeat as you label more; Bronze/Silver (①②) only rerun when you
+add new VODs.
 
 ---
 
@@ -103,12 +141,26 @@ theirs slivered → `winning`). It is the starting point for every sample.
    list. This concentrates the hour of hand-labeling on frames the rules/model
    disagree about, instead of re-confirming obvious cases.
 
-`labels.csv` is the single source of truth — `load_labeled_dataset` prefers it
-over any embedded `label` key. Expect **~10–20 s/frame** of review.
+### The label-review web tool (shipped)
 
-> **Not yet shipped**: `notebooks/04_label_review.ipynb` (batch reviewer that
-> shows frames + rule/model label + type confirm/correct → appends `labels.csv`).
-> Until it exists, label directly in a CSV editor or a notebook cell.
+The recommended review path is the FastAPI labeler — it shows the bronze frame,
+streams its Silver features + the rule bootstrap, and writes your answer back
+into the scaffolding JSON for the frame. No CSV editing.
+
+```bash
+python -m src.pipeline.labeling --init     # create one <stem>_labeling.json per frame
+uvicorn app.labeler:app --port 8765        # open http://127.0.0.1:8765
+```
+
+- Keys 1/2/3 = `winning|losing|stalemate`, `s` = Skip (OOD), `n`/`p` = next/prev,
+  `u` = undo, `e` = export.
+- Filling a label auto-advances to the next unlabeled frame.
+- **Export** (or `python -m src.pipeline.labeling --export`) writes
+  `data/gold/labels.csv` from every labeled, non-skipped scaffold — that CSV is
+  the single source of truth that `load_labeled_dataset` reads.
+
+`labels.csv` takes precedence over any embedded `label` key. Expect
+**~10–20 s/frame** of review.
 
 ### Silver CNN labels (later, optional)
 
@@ -242,7 +294,7 @@ like).
 |-------|-------------|-----------|
 | 1 | Fresh-volume capture (this doc) | `data/videos/` has 3–30 min of verified-playable clip |
 | 2 | Bronze→Silver→gold pass over clips | Frames flow end-to-end, no naming surprises |
-| 3 | `notebooks/04_label_review.ipynb` | Confirm/correct labels → `labels.csv` rows append |
+| 3 | `app/labeler.py` web review tool | Confirm/correct/skip labels in a browser → scaffold JSONs + `labels.csv` export |
 | 4 | Label 200–300 (uncertainty order) batches | `train_and_compare` macro-F1 plateaus |
 | 5 | Production retrain on `data/gold` | Best model promoted in MLflow registry, `predict()` uses it |
 | 6 | (Later) 100–200 hand-annotated Silver frames | First real-data `silver_cnn` run |

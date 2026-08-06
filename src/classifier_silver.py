@@ -398,14 +398,16 @@ def classify_frame(
     damage_flash = read_damage_flash(frame, DAMAGE_FLASH_REGION)
     ready, ability_conf = read_ability_indicators(frame, ABILITY_ROW_REGION)
     domain_ready = bool(all(ready))
-    clock_sec, clock_conf = read_clock_ocr(frame, CLOCK_REGION)
 
-    confs = [health_conf, clock_conf, ability_conf]
+    # There is no round clock in regular game modes (Jujutsu Shenanigans
+    # duels have none), so the clock region is not a Silver feature: we never
+    # OCR it, never warn about it, and exclude it from OCR confidence.
+    clock_sec = None
+
+    confs = [health_conf, ability_conf]
     min_conf = float(np.min(confs))
     if min_conf < warn_threshold:
         warnings.append(f"low OCR confidence {min_conf:.2f}")
-    if clock_sec is None:
-        warnings.append("clock unreadable")
 
     return SilverFeatures(
         image_path=image_path,
@@ -426,12 +428,14 @@ def classify_frame(
     )
 
 
-def _is_new_round(
-    state: SilverFeatures, prev_clock: float | None, prev_health: float | None
-) -> bool:
-    """Detect a round boundary from the state deltas: rewind or heal-up."""
-    if state.clock_sec is not None and prev_clock is not None:
-        return state.clock_sec > prev_clock + 3.0
+def _is_new_round(state: SilverFeatures, prev_health: float | None) -> bool:
+    """Detect a round boundary from the state deltas: a big health heal-up.
+
+    The recorded game modes have no round clock, so a new round is signalled
+    only by the health bar snapping back up (respawn / round reset). A heal of
+    more than ``+0.55`` between consecutive frames means the previous round
+    ended (the player died, or a round was reset).
+    """
     return bool(prev_health is not None and state.player_health > prev_health + 0.55)
 
 
@@ -439,13 +443,11 @@ def assign_round_indices(states: list[SilverFeatures]) -> list[SilverFeatures]:
     """Tag each state tuple with a monotonic round index (0-based)."""
     tagged: list[SilverFeatures] = []
     current = 0
-    prev_clock: float | None = None
     prev_health: float | None = None
     for state in states:
-        if tagged and _is_new_round(state, prev_clock, prev_health):
+        if tagged and _is_new_round(state, prev_health):
             current += 1
         tagged.append(replace(state, round_index=current))
-        prev_clock = state.clock_sec
         prev_health = state.player_health
     return tagged
 

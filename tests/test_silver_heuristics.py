@@ -11,6 +11,7 @@ the clock OCR must read exactly on every seed.
 """
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -107,10 +108,12 @@ class TestClassifyRoundTrip:
             assert out.num_enemies == len(state["enemies"])
             assert out.player_position[0] == pytest.approx(0.5, abs=0.02)
 
-    def test_clock_and_health_roundtrip_from_simulated_match(self):
+    def test_health_roundtrip_from_simulated_match(self):
         for entry in simulate_match(num_frames=40, seed=3):
             out = classify_frame(entry["frame"])
-            assert out.clock_sec == pytest.approx(entry["clock_sec"], abs=1.0)
+            # Regular game modes have no round clock, so classify_frame never
+            # reads one: the feature is always None and never warned about.
+            assert out.clock_sec is None
             assert 0.0 <= out.player_health <= 1.0
 
     def test_wrong_shape_rejected(self):
@@ -123,13 +126,25 @@ class TestClassifyRoundTrip:
 
 
 class TestAggregateRounds:
-    def test_simulated_match_rounds_are_bundled(self):
+    def test_simulated_match_no_clock_stays_in_one_round(self):
+        # With the clock removed, round boundaries are signalled only by a
+        # sharp health rewind (> 0.55). The synthetic match only heals ~0.1
+        # between resets, so the whole clip lands in round 0.
         entries = simulate_match(num_frames=40, seed=3)
         states = [classify_frame(e["frame"]) for e in entries]
         tagged, summaries = aggregate_rounds(states)
-        assert [s.round_index for s in tagged] == sorted(s.round_index for s in tagged)
-        assert [r.num_frames for r in summaries] == [15, 15, 10]
-        assert [r.round_index for r in summaries] == [0, 1, 2]
+        assert set(s.round_index for s in tagged) == {0}
+        assert [r.num_frames for r in summaries] == [40]
+
+    def test_health_reset_starts_a_new_round(self):
+        entries = simulate_match(num_frames=5, seed=3)
+        states = [classify_frame(e["frame"]) for e in entries]
+        states[0] = replace(states[0], player_health=0.9)
+        states[1] = replace(states[1], player_health=0.2)
+        states[2] = replace(states[2], player_health=1.0)
+        tagged, summaries = aggregate_rounds(states)
+        assert {s.round_index for s in tagged} == {0, 1}
+        assert len(summaries) == 2
 
     def test_round_summary_health_stats(self):
         entries = simulate_match(num_frames=40, seed=3)

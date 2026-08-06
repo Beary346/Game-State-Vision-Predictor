@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Silver Label Review</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2f3a;
+    --text: #e6e8ee; --muted: #9aa3b2;
+    --win: #2ecc71; --lose: #e74c3c; --stalemate: #f1c40f;
+    --accent: #4f8cff; --skip: #7f8c9b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+  #app { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+  #sidebar { border-right: 1px solid var(--border); background: var(--panel);
+             display: flex; flex-direction: column; min-height: 0; }
+  #progress { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  #progress .bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  #progress .fill { height: 100%; background: var(--accent); width: 0%; transition: width .2s; }
+  #progress .counts { display: flex; justify-content: space-between; margin-top: 6px;
+                      font-size: 12px; color: var(--muted); }
+  #toolbar { display: flex; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  #toolbar button, #jumpBtn { background: #222732; color: var(--text); border: 1px solid var(--border);
+                              border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
+  #toolbar button:hover, #jumpBtn:hover { border-color: var(--accent); }
+  #filter { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  #filter button { flex: 1; background: transparent; color: var(--muted); border: 1px solid transparent;
+                   border-radius: 6px; padding: 5px 4px; cursor: pointer; font-size: 12px; }
+  #filter button.active { color: var(--text); border-color: var(--accent); background: #1d2733; }
+  #frameList { overflow-y: auto; flex: 1; padding: 6px; }
+  .frow { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px;
+          cursor: pointer; font-size: 12px; color: var(--muted); border: 1px solid transparent; margin-bottom: 2px; }
+  .frow:hover { background: #20242e; }
+  .frow.active { border-color: var(--accent); background: #1d2733; color: var(--text); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #333a46; }
+  .winning .dot { background: var(--win); } .losing .dot { background: var(--lose); }
+  .stalemate .dot { background: var(--stalemate); } .skipped .dot { background: var(--skip); }
+  .frow .idx { margin-left: auto; color: #6b7484; font-variant-numeric: tabular-nums; max-width: 60%;
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #main { display: grid; grid-template-rows: 1fr auto; min-width: 0; }
+  #imageBox { overflow: auto; background: #0a0c10; display: grid; place-items: center; }
+  #imageBox img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+  #empty { color: #566; font-size: 15px; }
+  #rightPanel { border-top: 1px solid var(--border); background: var(--panel); padding: 12px 16px; }
+  #stateChip { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  #actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  #actions button { border: none; border-radius: 8px; padding: 10px 18px; font-size: 15px; font-weight: 600;
+                    cursor: pointer; color: #101014; }
+  #btnWin { background: var(--win); } #btnLose { background: var(--lose); } #btnStale { background: var(--stalemate); }
+  #btnSkip { background: #48505e; color: var(--text); }
+  #actions button.active { outline: 3px solid #fff; }
+  #notes { flex: 1; min-width: 180px; background: #10131a; color: var(--text);
+           border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+  #featBox { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px;
+             margin-top: 10px; font-size: 13px; }
+  .feat { color: var(--muted); } .feat b { color: var(--text); font-weight: 500; }
+  kbd { background: #222b33; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div id="progress">
+      <div class="bar"><div class="fill" id="progressFill"></div></div>
+      <div class="counts"><span id="pLabeled">–</span><span id="pTotal">–</span><span id="pUnlabeled">–</span></div>
+    </div>
+    <div id="toolbar">
+      <button id="undoBtn" title="Undo answer (u)">Undo</button>
+      <button id="exportBtn" title="Write labels.csv (e)">Export labels.csv</button>
+      <button id="jumpBtn" title="Jump to stem">Jump…</button>
+    </div>
+    <div id="filter">
+      <button data-f="todo" class="active">To do</button>
+      <button data-f="labeled">Labeled</button>
+      <button data-f="skipped">Skipped</button>
+      <button data-f="all">All</button>
+    </div>
+    <div id="frameList"></div>
+  </aside>
+
+  <main id="main">
+    <div id="imageBox"><div id="empty">No frame selected</div></div>
+    <section id="rightPanel">
+      <div id="stateChip">—</div>
+      <div id="actions">
+        <button id="btnWin" data-state="winning">1 · Winning</button>
+        <button id="btnLose" data-state="losing">2 · Losing</button>
+        <button id="btnStale" data-state="stalemate">3 · Stalemate</button>
+        <button id="btnSkip" data-state="skip" title="Out-of-distribution noise — skip">Skip</button>
+        <input id="notes" type="text" placeholder="notes (optional)" />
+      </div>
+      <div id="featBox">
+        <div class="feat"><b>Rule label</b><br/><span id="fRule">–</span></div>
+        <div class="feat"><b>Player health</b><br/><span id="fHealth">–</span></div>
+        <div class="feat"><b>Enemies (health)</b><br/><span id="fEnemies">–</span></div>
+        <div class="feat"><b>Attack / Defense</b><br/><span id="fFlags">–</span></div>
+        <div class="feat"><b>Damage flash</b><br/><span id="fDmg">–</span></div>
+        <div class="feat"><b>OCR conf</b><br/><span id="fConf">–</span></div>
+        <div class="feat"><b>Round @ time</b><br/><span id="fRound">–</span></div>
+        <div class="feat"><b>Frame</b><br/><span id="fFrame">–</span></div>
+      </div>
+      <div style="margin-top:6px;color:var(--muted);font-size:11px">
+        <kbd>1</kbd>win · <kbd>2</kbd>lose · <kbd>3</kbd>stale · <kbd>s</kbd>skip · <kbd>u</kbd>undo ·
+        <kbd>n</kbd>/<kbd>p</kbd>nav · <kbd>e</kbd>export
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const FILTERS = { todo: "unlabeled", labeled: "labeled", skipped: "skipped", all: "all" };
+
+let stems = [];            // stems in the current filtered view
+let current = null;        // selected stem
+let states = {};           // stem -> {label, skip, rule_label}
+let total = 0;
+const PAGE = 120;
+
+async function json(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error((await r.text()) || r.status);
+  return r.json();
+}
+
+async function loadSummary() {
+  const s = await json("/api/summary");
+  total = s.total;
+  $("pTotal").textContent = s.total + " total";
+  $("pLabeled").textContent = s.labeled + " labeled";
+  $("pUnlabeled").textContent = s.unlabeled + " todo";
+  $("progressFill").style.width = ((s.labeled + s.skipped) / s.total) * 100 + "%";
+}
+
+let statesFetched = false;
+async function loadStates() {
+  states = await json("/api/states");
+  statesFetched = true;
+}
+
+function statusOf(stem) {
+  const s = states[stem];
+  if (!s) return "none";
+  if (s.skip) return "skip";
+  return s.label || "none";
+}
+
+function loadFrames(filter, reset = true) {
+  if (reset) stems = [];
+  const apiFilter = FILTERS[filter] || "all";
+  return json(`/api/frames?status=${apiFilter}&offset=${stems.length}&limit=${PAGE}`)
+    .then((d) => {
+      stems = stems.concat(d.stems);
+      renderFrameList();
+      if (d.stems.length === PAGE) {
+        // keep paging in the background until exhausted
+        loadFrames(filter, false).catch(() => {});
+      }
+    });
+}
+
+function renderFrameList() {
+  const box = $("frameList");
+  box.innerHTML = "";
+  for (const stem of stems) {
+    const row = document.createElement("div");
+    row.className = "frow";
+    row.dataset.stem = stem;
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    const name = document.createElement("span");
+    name.textContent = stem;
+    const idx = document.createElement("span");
+    idx.className = "idx";
+    idx.textContent = stateMeta(stem);
+    row.append(dot, name, idx);
+    row.addEventListener("click", () => select({ stem }));
+    box.appendChild(row);
+  }
+  markCurrent();
+}
+
+function stateMeta(stem) {
+  const status = statusOf(stem);
+  return status === "none" ? "not labeled" : status;
+}
+
+function repaintRow(stem) {
+  const row = document.querySelector(`.frow[data-stem="${CSS.escape(stem)}"]`);
+  if (!row) return;
+  row.classList.toggle("winning", states[stem]?.label === "winning");
+  row.classList.toggle("losing", states[stem]?.label === "losing");
+  row.classList.toggle("stalemate", states[stem]?.label === "stalemate");
+  row.classList.toggle("skip", !!states[stem]?.skip);
+  row.querySelector(".idx").textContent = stateMeta(stem);
+}
+
+function markCurrent() {
+  document.querySelectorAll(".frow").forEach((r) => r.classList.toggle("active", r.dataset.stem === current));
+}
+
+async function openFrame(stem) {
+  current = stem;
+  const d = await json(`/api/frame/${encodeURIComponent(stem)}`);
+  showFrame(d);
+  markCurrent();
+}
+
+function showFrame(d) {
+  const f = d.features;
+  $("imageBox").innerHTML = `<img src="${d.image}" alt="${d.image_rel}"/>`;
+  $("stateChip").textContent = d.stem;
+  $("fRule").textContent = f.rule_label || "–";
+  $("fHealth").textContent = Math.round(f.player_health * 100) + "%";
+  const enemies = (f.enemies || []).map((e) => Math.round(e.health * 100));
+  $("fEnemies").textContent = f.num_enemies + (enemies.length ? " [" + enemies.join(", ") + "%]" : "");
+  $("fFlags").textContent = (f.attacking ? "attacking" : "—") + " / " + (f.defending ? "defending" : "—");
+  $("fDmg").textContent = f.damage_indicator ? "yes" : "no";
+  $("fConf").textContent = f.ocr_confidence.toFixed(2);
+  $("fRound").textContent = "r" + f.round_index + " @ " + f.timestamp_sec.toFixed(1) + "s";
+  $("fFrame").textContent = d.image_rel || "–";
+  $("notes").value = f.notes || "";
+  paintActions(f);
+}
+
+function paintActions() {
+  const f = states[current] || {};
+  const sel = f.skip ? "skip" : f.label || "";
+  ["btnWin", "btnLose", "btnStale", "btnSkip"].forEach((id) => {
+    const key = { btnWin: "winning", btnLose: "losing", btnStale: "stalemate", btnSkip: "skip" }[id];
+    document.getElementById(id).classList.toggle("active", sel === key);
+  });
+}
+
+async function savePatch(patch) {
+  if (!current) return;
+  const d = await json(`/api/frame/${encodeURIComponent(current)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  states[current] = { label: d.payload.label, skip: d.payload.skip, rule: d.payload.rule_label };
+  paintActions();
+  repaintRow(current);
+  loadSummary().catch(() => {});
+}
+
+function nextFrame(step = 1) {
+  const idx = stems.indexOf(current);
+  const target = idx + step;
+  if (target < 0) return;
+  if (target < stems.length) openFrame(stems[target]);
+}
+
+function labelAndAdvance(label) {
+  if (!current) return;
+  savePatch({ label }).then(() => nextFrame());
+}
+
+async function exportLabels() {
+  const r = await json("/api/export", { method: "POST" });
+  alert(`Exported ${r.rows} labels -> data/gold/labels.csv`);
+  loadSummary().catch(() => {});
+}
+
+document.getElementById("undoBtn").addEventListener("click", () => savePatch({ label: null, skip: false }));
+document.getElementById("exportBtn").addEventListener("click", exportLabels);
+document.getElementById("jumpBtn").addEventListener("click", () => {
+  const stem = prompt("Frame stem (e.g. MedalTVRoblox20260703214908512_frame_001120):");
+  if (stem) openFrame(stem.trim());
+});
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("#actions button");
+  if (!b) return;
+  if (b.id === "btnSkip") savePatch({ skip: true });
+  else labelAndAdvance(b.dataset.state);
+});
+
+const notesEl = document.getElementById("notes");
+notesEl.addEventListener("change", () => savePatch({ notes: notesEl.value }));
+
+document.addEventListener("keydown", (e) => {
+  if (e.target === notesEl) {
+    if (e.key === "Escape") { notesEl.value = ""; savePatch({ notes: "" }); }
+    return;
+  }
+  if (e.key === "1") labelAndAdvance("winning");
+  if (e.key === "2") labelAndAdvance("losing");
+  if (e.key === "3") labelAndAdvance("stalemate");
+  if (e.key === "s") savePatch({ skip: true });
+  if (e.key === "u") savePatch({ label: null, skip: false });
+  if (e.key === "n") nextFrame(1);
+  if (e.key === "p") nextFrame(-1);
+  if (e.key === "e") exportLabels();
+});
+
+document.getElementById("filter").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  document.querySelectorAll("#filter button").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active");
+  loadFrames(b.dataset.f);
+});
+
+// auto-open the first to-do stem when the corpus is empty-labeled
+async function openFirstUnlabeled() {
+  const d = await json("/api/frames?status=unlabeled&offset=0&limit=1");
+  if (d.stems.length) openFrame(d.stems[0]);
+}
+
+(async function init() {
+  await loadStates();
+  await Promise.all([loadSummary(), loadFrames("todo")]);
+  openFirstUnlabeled();
+})();
+</script>
+</body>
+</html>

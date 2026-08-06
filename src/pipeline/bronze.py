@@ -51,3 +51,16 @@ __all__ = [
     "sharpen",
     "validate_vod_duration",
 ]
+
+
+if __name__ == "__main__":
+    """Make ``python -m src.pipeline.bronze`` behave like the real CLI.
+
+    The shim is a re-export module and carries no its own argparse; we re-run
+    the canonical ingestor module as ``__main__`` so the documented command in
+    ``docs/data_collection_plan.md`` works verbatim.
+    """
+
+    import runpy
+
+    runpy.run_module("src.ingestor_bronze", run_name="__main__")

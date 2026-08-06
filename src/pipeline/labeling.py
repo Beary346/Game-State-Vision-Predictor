@@ -1,0 +1,210 @@
+"""Labeling scaffolds: per-frame Gold training scaffolds.
+
+One ``<stem>_labeling.json`` is written for every real Silver frame. It starts
+as a verbatim copy of the Silver feature tuple (the shape a reviewer wants to
+see: ``player_health``, ``enemies``, ``attacking``, ...) plus the fields the
+reviewer fills in:
+
+- ``label``    one of ``winning | losing | stalemate`` or ``null``
+- ``skip``     true when the frame is out-of-distribution noise
+- ``notes``    free-form flag for the reviewer
+
+The web tool in ``app/labeler.py`` shows the bronze image for each stem, exposes
+the extracted features + the rule-bootstrap label, and writes answers straight
+back into these JSON files. ``export_labels_csv`` is the bridge to Gold: it
+flattens every labeled, non-skipped scaffold into ``labels.csv``, which
+``src/pipeline/gold.py`` treats as the source of truth.
+
+CLI::
+
+    python -m src.pipeline.labeling --init                           # create scaffolds
+    python -m src.pipeline.labeling --summary                        # progress counts
+    python -m src.pipeline.labeling --export                         # build labels.csv
+
+Paths follow data_collection_plan.md::
+
+    data/gold/silver/<stem>_silver.json        # Silver features (pre-existing)
+    data/gold/labeling/<stem>_labeling.json    # this module's scaffold
+    data/gold/labels.csv                       # stem,label  <- Gold source of truth
+"""
+
+import argparse
+import csv
+import json
+from pathlib import Path
+
+from src.pipeline.gold import rule_based_label
+
+# The three plain-English states; order matches gold.STATE_LABELS.
+STATE_LABELS: tuple[str, str, str] = ("winning", "losing", "stalemate")
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def labeling_stem(silver_stem: str) -> str:
+    """Map a Silver filename stem to its labeling stem (``<stem>_silver`` -> ``<stem>``)."""
+    return silver_stem.removesuffix("_silver")
+
+
+def build_scaffold(silver_json: dict, stem: str) -> dict:
+    """Build an empty labeling scaffold from a Silver feature tuple.
+
+    ``silver_json`` is copied verbatim so nothing between the feature layer and
+    the label is lost; ``rule_label`` is the deterministic rule bootstrap from
+    Gold so the reviewer only has to confirm or correct obvious cases.
+    """
+    scaffold = dict(silver_json)
+    scaffold["label"] = None
+    scaffold["skip"] = False
+    scaffold["notes"] = ""
+    scaffold["rule_label"] = rule_based_label(scaffold)
+    scaffold["labeling_stem"] = stem
+    return scaffold
+
+
+def init_labeling_files(silver_dir: str | Path, labeling_dir: str | Path) -> dict:
+    """Create an empty labeling scaffold for every Silver JSON.
+
+    Files that already exist are never overwritten, so labels survive re-runs.
+    Returns ``{"created", "existing", "total"}``.
+    """
+    silver_dir = Path(silver_dir)
+    labeling_dir = Path(labeling_dir)
+    created = existing = 0
+    for json_path in sorted(silver_dir.glob("*_silver.json")):
+        data = _read_json(json_path)
+        if "player_health" not in data:
+            continue  # not a Silver features file
+        stem = labeling_stem(json_path.stem)
+        out = labeling_dir / f"{stem}_labeling.json"
+        if out.exists():
+            existing += 1
+            continue
+        _write_json(out, build_scaffold(data, stem))
+        created += 1
+    return {"created": created, "existing": existing, "total": created + existing}
+
+
+def _normalize_scaffold(payload: dict) -> dict:
+    """Guarantee the scaffold keys exist even on hand-edited files."""
+    payload.setdefault("label", None)
+    payload.setdefault("skip", False)
+    payload.setdefault("notes", "")
+    payload.setdefault("rule_label", None)
+    return payload
+
+
+def load_scaffold(labeling_dir: str | Path, stem: str) -> dict:
+    """Load one labeling scaffold (raises FileNotFoundError when missing)."""
+    path = Path(labeling_dir) / f"{stem}_labeling.json"
+    if not path.exists():
+        raise FileNotFoundError(f"No labeling file for stem {stem!r} at {path}")
+    return _normalize_scaffold(_read_json(path))
+
+
+def save_scaffold(labeling_dir: str | Path, stem: str, payload: dict) -> Path:
+    """Persist a labeling scaffold back to disk."""
+    path = Path(labeling_dir) / f"{stem}_labeling.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(path, payload)
+    return path
+
+
+def iter_scaffolds(labeling_dir: str | Path, load: bool = True) -> list[tuple[str, dict]]:
+    """List ``(stem, payload)`` for every scaffold in the labeling directory.
+
+    With ``load=False`` payloads are empty dicts -- cheaper when only filenames
+    matter (total frame count, frame list).
+    """
+    labeling_dir = Path(labeling_dir)
+    result: list[tuple[str, dict]] = []
+    for path in sorted(labeling_dir.glob("*_labeling.json")):
+        stem = path.stem.removesuffix("_labeling")
+        payload = _normalize_scaffold(_read_json(path)) if load else {}
+        result.append((stem, payload))
+    return result
+
+
+def valid_label(value) -> str | None:
+    """``value`` normalized and returned when it is one of STATE_LABELS, else ``None``."""
+    candidate = str(value).strip().lower()
+    return candidate if candidate in STATE_LABELS else None
+
+
+def summary(labeling_dir: str | Path) -> dict:
+    """Progress counts for the labeling corpus."""
+    total = labeled = skipped = 0
+    by_label = {label: 0 for label in STATE_LABELS}
+    for _, payload in iter_scaffolds(labeling_dir, load=True):
+        total += 1
+        if payload.get("skip"):
+            skipped += 1
+            continue
+        label = payload.get("label")
+        if label in by_label:
+            labeled += 1
+            by_label[label] += 1
+    return {
+        "total": total,
+        "labeled": labeled,
+        "skipped": skipped,
+        "unlabeled": total - labeled - skipped,
+        "by_label": by_label,
+    }
+
+
+def export_labels_csv(labeling_dir: str | Path, csv_path: str | Path) -> dict:
+    """Flatten labeled, non-skipped scaffolds into the ``labels.csv`` source of truth."""
+    rows = []
+    for stem, payload in iter_scaffolds(labeling_dir, load=True):
+        if payload.get("skip"):
+            continue
+        label = payload.get("label")
+        if label not in STATE_LABELS:
+            continue
+        rows.append({"stem": stem, "label": label})
+
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["stem", "label"])
+        writer.writeheader()
+        writer.writerows(rows)
+    return {"rows": len(rows), "path": str(csv_path)}
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Gold labeling scaffold tooling")
+    ap.add_argument("--init", action="store_true", help="create empty scaffolds for every Silver JSON")
+    ap.add_argument("--summary", action="store_true", help="print labeling progress counts")
+    ap.add_argument("--export", action="store_true", help="write labels.csv from labeled scaffolds")
+    ap.add_argument("--silver", default="data/gold/silver", help="Silver JSON directory")
+    ap.add_argument("--labeling", default="data/gold/labeling", help="labeling scaffold directory")
+    ap.add_argument("--out", default="data/gold/labels.csv", help="labels.csv output path")
+    args = ap.parse_args()
+
+    if args.init:
+        res = init_labeling_files(args.silver, args.labeling)
+        print(
+            f"Scaffolds: {res['created']} created, {res['existing']} unchanged, {res['total']} total"
+        )
+    if args.summary:
+        res = summary(args.labeling)
+        print(
+            f"Progress: {res['labeled']}/{res['total']} labeled, {res['skipped']} skipped, "
+            f"{res['unlabeled']} remaining"
+        )
+        print(f"  by label: {res['by_label']}")
+    if args.export:
+        res = export_labels_csv(args.labeling, args.out)
+        print(f"Exported {res['rows']} labeled rows -> {res['path']}")
