@@ -17,6 +17,9 @@ models/*
 outputs/*
 !outputs/.gitkeep
 
+# MLflow (tracking DBs + run artifact trees may be written relative to CWD)
+mlruns/
+
 # Notebook checkpoints
 .ipynb_checkpoints/
 

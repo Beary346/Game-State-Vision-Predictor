@@ -15,10 +15,12 @@ from src.pipeline.gold import (
     FEATURE_NAMES,
     MODEL_ZOO,
     STATE_LABELS,
+    classify_states,
     features_to_vector,
     generate_synthetic_dataset,
     load_labeled_dataset,
     predict,
+    process_vod_report,
     rule_based_label,
     train_and_compare,
     train_gold_model,
@@ -414,7 +416,7 @@ class TestPredict:
             experiment_name="test_gold_predict",
             run_name=f"predict_{model_name}",
         )
-        model = mlflow.sklearn.load_model(f"runs:/{result['run_id']}/model")
+        model = mlflow.sklearn.load_model(result["model_path"])
         return model
 
     def test_predict_winning(self, labeled_dataset, winning_features):
@@ -435,6 +437,123 @@ class TestPredict:
         label, probs = predict(winning_features, model)
         assert label in STATE_LABELS
         assert sum(probs.values()) == pytest.approx(1.0, abs=1e-5)
+
+
+# ── Per-frame state classification over a stream ─────────────────────────────
+
+
+class TestClassifyStates:
+    def _trained_model(self, labeled_dataset, model_name="random_forest"):
+        import mlflow
+
+        result = train_gold_model(
+            labeled_dataset,
+            model_name=model_name,
+            model_params={"n_estimators": 20, "epochs": 10},
+            experiment_name="test_gold_stream",
+            run_name=f"stream_{model_name}",
+        )
+        return mlflow.sklearn.load_model(result["model_path"])
+
+    def test_classify_states_adds_labels(
+        self, labeled_dataset, winning_features, losing_features, stalemate_features
+    ):
+        model = self._trained_model(labeled_dataset)
+        stream = [winning_features, stalemate_features, losing_features]
+        out = classify_states(stream, model)
+        assert len(out) == 3
+        for row in out:
+            state = row["state"]
+            assert state["state_label"] in STATE_LABELS
+            assert set(row["state_probs"].keys()) == set(STATE_LABELS)
+            assert sum(row["state_probs"].values()) == pytest.approx(1.0, abs=1e-5)
+
+    def test_classify_states_preserves_original_keys(self, labeled_dataset, winning_features):
+        model = self._trained_model(labeled_dataset)
+        out = classify_states([winning_features], model)
+        state = out[0]["state"]
+        for key in ("player_health", "enemies", "attacking", "num_enemies"):
+            assert key in state
+        assert out[0]["frame_index"] == winning_features.get("frame_index", 0)
+
+    def test_rule_based_fallback_without_model(self, winning_features):
+        out = classify_states([winning_features], model=None)
+        assert out[0]["state"]["state_label"] == rule_based_label(winning_features)
+
+    def test_empty_stream(self):
+        assert classify_states([], model=None) == []
+
+
+# ── Per-VOD Gold report (end-to-end) ─────────────────────────────────────────
+
+
+class TestProcessVodReport:
+    def _trained_model(self, labeled_dataset):
+        import mlflow
+
+        result = train_gold_model(
+            labeled_dataset,
+            model_name="random_forest",
+            model_params={"n_estimators": 20},
+            experiment_name="test_gold_vod_pipeline",
+            run_name="pytest_vod_model",
+        )
+        return mlflow.sklearn.load_model(result["model_path"])
+
+    def _stream(self, base_features, n=3):
+        """Repeat one feature dict across a few frames with timestamps."""
+        out = []
+        for i in range(n):
+            row = dict(base_features)
+            row["frame_index"] = i
+            row["timestamp_sec"] = i / 30.0
+            out.append(row)
+        return out
+
+    def test_full_pipeline_runs(self, tmp_path, labeled_dataset, winning_features):
+        model = self._trained_model(labeled_dataset)
+        result = process_vod_report(
+            states=self._stream(winning_features),
+            model=model,
+            vod_file="match.mp4",
+            output_dir=str(tmp_path / "out"),
+            experiment_name="test_gold_vod_pipeline",
+            run_name="pytest_vod",
+        )
+        assert "run_id" in result
+        assert result["vod_file"] == "match.mp4"
+        assert 0.0 <= result["score"] <= 100.0
+        assert result["n_frames"] == 3
+        assert Path(result["timeline_json"]).exists()
+        assert Path(result["stat_card"]).exists()
+
+    def test_mlflow_metrics_logged(self, tmp_path, labeled_dataset, winning_features):
+        model = self._trained_model(labeled_dataset)
+        result = process_vod_report(
+            states=self._stream(winning_features),
+            model=model,
+            vod_file="match.mp4",
+            output_dir=str(tmp_path / "out"),
+            experiment_name="test_gold_vod_metrics",
+        )
+        import mlflow
+
+        run = mlflow.get_run(result["run_id"])
+        assert float(run.data.metrics["n_frames"]) == 3
+        assert "score" in run.data.metrics
+        assert "mean_ocr_confidence" in run.data.metrics
+        assert "total_events" in run.data.metrics
+
+    def test_default_output_dir(self, tmp_path, labeled_dataset, winning_features):
+        model = self._trained_model(labeled_dataset)
+        result = process_vod_report(
+            states=self._stream(winning_features),
+            model=model,
+            vod_file="match.mp4",
+            experiment_name="test_gold_vod_default_dir",
+        )
+        assert Path(result["timeline_json"]).exists()
+        assert "match" in result["timeline_json"]
 
 
 # ── Model comparison ─────────────────────────────────────────────────────────

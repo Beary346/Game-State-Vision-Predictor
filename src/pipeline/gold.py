@@ -1,8 +1,22 @@
-"""Gold layer: state classification (winning / losing / stalemate).
+"""Gold layer: state classification + match reporting (winning / losing / stalemate).
 
-Consumes Silver feature JSONs (plus human labels in ``labels.csv`` or an
-embedded ``label`` key), trains a variety of classifiers under MLflow, and
-returns a ranked leaderboard so the best model can be picked.
+The Gold layer owns everything downstream of Silver's per-frame state tuples:
+
+1. **Training** -- ``train_gold_model`` / ``train_and_compare`` race a wide
+   variety of classifiers (sklearn, XGBoost, PyTorch MLP) under MLflow on
+   labeled Silver data; every run logs params, metrics, and confusion-matrix
+   artifacts. The best model becomes the state-reader.
+2. **Per-frame state classification** -- ``classify_states`` turns a stream of
+   Silver tuples into per-frame ``winning`` / ``losing`` / ``stalemate``
+   labels using a trained model (or the deterministic ``rule_based_label``).
+3. **Event layer** -- ``detect_events`` (events_gold.py) turns state deltas
+   into hits, punishes, whiffs, round outcomes, and domain alerts.
+4. **Reporting** -- ``process_vod_report`` runs one match end-to-end: classify
+   -> events -> timeline JSON + PIL stat card -> a per-VOD MLflow run with
+   params (VOD file, event thresholds), metrics (event counts, mean OCR
+   confidence, score) and artifacts (timeline JSON + stat card).
+5. **Registry** -- ``model_registry.py`` registers the state-reader as a
+   versioned MLflow model (Staging -> Production).
 
 Feature vector layout (see ``FEATURE_NAMES``):
     player_health, mean_enemy_health, min_enemy_health, health_ratio,
@@ -17,8 +31,8 @@ Labels follow AGENTS.md definitions:
 import argparse
 import csv
 import json
-import os
 import tempfile
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -38,6 +52,9 @@ from sklearn.svm import SVC
 from torch import nn
 from xgboost import XGBClassifier
 
+from src.config import OUTPUTS_DIR
+from src.pipeline.events_gold import detect_events
+from src.pipeline.report import ensure_tracking_uri, log_vod_report
 from src.pipeline.silver import H, W
 
 # The three plain-English game states produced by the Gold layer.
@@ -59,18 +76,8 @@ _EPS = 1e-12
 
 
 def _ensure_tracking_uri():
-    """Set a safe MLflow tracking URI (SQLite) that won't conflict with spaces in paths.
-
-    Mirrors silver_train's helper so every pipeline stage uses one consistent store.
-    """
-    uri = os.environ.get("MLFLOW_TRACKING_URI")
-    if uri:
-        return uri
-    safe_path = os.path.join(tempfile.gettempdir(), "mlruns", "mlflow.db")
-    os.makedirs(os.path.dirname(safe_path), exist_ok=True)
-    uri = f"sqlite:///{safe_path}"
-    mlflow.set_tracking_uri(uri)
-    return uri
+    """Alias of the shared tracker used by the training entry points."""
+    return ensure_tracking_uri()
 
 
 # ── Feature engineering ──────────────────────────────────────────────────────
@@ -563,8 +570,11 @@ def train_gold_model(
 
         # cloudpickle (instead of skops) so XGBoost and TorchMLPClassifier
         # round-trip without the skops "untrusted types" safety check.
-        mlflow.sklearn.log_model(model, "model", serialization_format="cloudpickle")
-        model_path = f"runs:/{run_id}/model"
+        model_info = mlflow.sklearn.log_model(model, "model", serialization_format="cloudpickle")
+        # MLflow 3.x stores logged models in an experiment-level model store and
+        # returns the canonical model URI (models:/m-<id>); the classic
+        # runs:/<run>/model path no longer resolves against that layout.
+        model_path = model_info.model_uri
         mlflow.log_param("logged_model", model_path)
 
     print(f"{model_name:22s}  acc={accuracy:.3f}  macro_f1={macro_f1:.3f}  run={run_id}")
@@ -683,15 +693,157 @@ def predict(features, model) -> tuple[str, dict[str, float]]:
     return STATE_LABELS[pred_idx], probs
 
 
+# ── Per-stream classification & end-to-end VOD reports ───────────────────────
+
+
+def classify_state(features, model=None) -> tuple[str, dict[str, float]]:
+    """Classify one SilverFeatures dict into ``(label, probs)``.
+
+    With a trained ``model`` the model prediction (plus full probabilities) is
+    used; without one the deterministic ``rule_based_label`` fills in, so the
+    pipeline stays usable before real training data exists.
+    """
+    state = features if isinstance(features, dict) else asdict(features)
+    if model is None:
+        return rule_based_label(state), {}
+    return predict(state, model)
+
+
+def classify_states(states: list, model=None) -> list[dict]:
+    """Label every frame of a match stream; return one row per frame.
+
+    Each row is ``{"state": <state + state_label>, "state_probs": {...},
+    "frame_index": n}``. The ``state`` dicts keep every original key so the
+    event layer and the report can still read healths, attacks, and domains.
+    """
+    out: list[dict] = []
+    for i, features in enumerate(states):
+        state = features if isinstance(features, dict) else asdict(features)
+        # Normalize to the full shape the event/report layers expect. Minimal
+        # 8-field feature dicts (older annotations, hand-built tests) get safe
+        # defaults instead of crashing the report.
+        if "frame_index" not in state:
+            state["frame_index"] = int(state.get("timestamp_sec", 0.0) * 30 if state.get("timestamp_sec") else i)
+        state.setdefault("round_index", 0)
+        state.setdefault("timestamp_sec", float(state["frame_index"]) / 30.0)
+        state.setdefault("clock_sec", None)
+        state.setdefault("domain_ready", False)
+        state.setdefault("ocr_confidence", 1.0)
+        state.setdefault("attacking", False)
+        state.setdefault("defending", False)
+        state.setdefault("damage_indicator", False)
+        state.setdefault("num_enemies", len(state.get("enemies", [])))
+        label, probs = classify_state(state, model)
+        state["state_label"] = label
+        out.append(
+            {
+                "state": state,
+                "state_probs": probs,
+                "frame_index": state.get("frame_index", i),
+            }
+        )
+    return out
+
+
+def load_states_from_dir(states_dir: str) -> list[dict]:
+    """Load every ``*_silver.json`` in a directory as one ordered frame stream.
+
+    Skips non-state sidecars (e.g. Bronze metadata, rounds.json) by requiring
+    the ``player_health`` key, then sorts by frame_index.
+    """
+    states_dir = Path(states_dir)
+    states: list[dict] = []
+    for path in sorted(states_dir.glob("*_silver.json")):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if "player_health" not in data:
+            continue
+        states.append(data)
+    states.sort(key=lambda s: s.get("frame_index", 0))
+    if not states:
+        raise ValueError(f"no *_silver.json state files with a player_health key in {states_dir}")
+    return states
+
+
+def process_vod_report(
+    *,
+    states: list,
+    model=None,
+    vod_file: str = "",
+    output_dir: str | None = None,
+    experiment_name: str = "gold_vod_report",
+    run_name: str | None = None,
+    event_kwargs: dict | None = None,
+) -> dict:
+    """Run the full Gold pipeline over one match and return its MLflow report.
+
+    classify -> events -> timeline JSON + PIL stat card -> per-VOD MLflow run.
+    With ``output_dir=None`` the artifacts land under ``outputs/gold_<stem>``.
+
+    Returns the ``log_vod_report`` summary (run_id, timeline_json, stat_card,
+    score, headline...) extended with ``vod_file`` and ``n_frames``.
+    """
+    classified = classify_states(states, model=model)
+    stream = [row["state"] for row in classified]
+
+    events = detect_events(stream, **(event_kwargs or {}))
+
+    stem = Path(vod_file).stem or "match"
+    out_dir = output_dir or str(OUTPUTS_DIR / f"gold_{stem}")
+
+    result = log_vod_report(
+        states=stream,
+        events=events,
+        output_dir=out_dir,
+        vod_name=vod_file,
+        experiment_name=experiment_name,
+        run_name=run_name,
+        event_kwargs=event_kwargs,
+    )
+    result["vod_file"] = vod_file
+    result["n_frames"] = len(stream)
+    result["n_events"] = len(events)
+    return result
+
+
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Gold: state classification with MLflow model comparison")
+    ap = argparse.ArgumentParser(description="Gold: train the state-reader, and render per-VOD match reports")
     ap.add_argument("--data-root", default=None, help="path to labeled dataset (silver/ + labels.csv)")
     ap.add_argument("--synthetic", type=int, default=None, help="generate N synthetic labeled samples into a temp dir")
     ap.add_argument("--model", default=None, help="train only this model (default: all models in the zoo)")
     ap.add_argument("--experiment", default="gold_classifier", help="MLflow experiment name")
     ap.add_argument("--val-split", type=float, default=0.2, help="validation split fraction")
     ap.add_argument("--seed", type=int, default=42, help="random seed")
+    ap.add_argument("--vod-report", action="store_true", help="process a VOD's silver state JSONs into a match report")
+    ap.add_argument("--states-dir", default=None, help="directory of *_silver.json state files (for --vod-report)")
+    ap.add_argument("--states-model", default=None, help="'run:ID/model' URI of a trained state-reader (for --vod-report)")
     args = vars(ap.parse_args())
+
+    if args["vod_report"]:
+        if not args["states_dir"]:
+            ap.error("--vod-report needs --states-dir")
+        model = None
+        if args["states_model"]:
+            model = mlflow.sklearn.load_model(args["states_model"])
+        states = load_states_from_dir(args["states_dir"])
+        print(f"Reading {len(states)} frames from {args['states_dir']}...")
+        result = process_vod_report(
+            states=states,
+            model=model,
+            vod_file=args["states_dir"],
+            experiment_name=args["experiment"],
+            event_kwargs={},
+        )
+        print(f"\nScore {result['score']:.0f}/100 for {result['vod_file']}")
+        print(
+            f"  hits {result['headline']['hits_landed']}  punishes {result['headline']['punishes']}"
+            f"  whiffs {result['headline']['whiffs']}  rounds {result['headline']['round_wins']}W "
+            f"{result['headline']['round_losses']}L"
+        )
+        print(f"Timeline : {result['timeline_json']}")
+        print(f"Stat card: {result['stat_card']}")
+        print(f"MLflow run: {result['run_id']} ({result['experiment_name']})")
+        raise SystemExit(0)
 
     data_root = args["data_root"]
     if data_root is None:
