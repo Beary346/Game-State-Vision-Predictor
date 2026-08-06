@@ -157,7 +157,7 @@ class TestProcessFrames:
         silver_dir = tmp_path / "silver"
         bronze_dir.mkdir()
         for i, entry in enumerate(simulate_match(num_frames=5, seed=7)):
-            png = bronze_dir / f"match_00000_bronze_frame_{i:06d}.png"
+            png = bronze_dir / f"match_00000_frame_{i:06d}_bronze.png"
             cv2.imwrite(str(png), cv2.cvtColor(entry["frame"], cv2.COLOR_RGB2BGR))
             with open(png.with_suffix(".json"), "w", encoding="utf-8") as fh:
                 json.dump({"frame_index": i, "timestamp_sec": i / 30.0}, fh)

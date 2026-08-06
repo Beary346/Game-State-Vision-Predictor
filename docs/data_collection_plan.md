@@ -1,174 +1,238 @@
-# Data Collection Plan: 1000–2000 Labeled Screenshots
+# Data Collection Plan
 
-**Game**: Jujutsu Shenanigans (Roblox)
-**Goal**: 1000–2000 real, labeled screenshots so the Gold classifier (and later
-the Silver CNN) stops relying on synthetic data.
+**Game**: Jujutsu Shenanigans (Roblox), 1920×1080 playback
+**Goal**: enough real footage for the Gold state-reader (`winning|losing|stalemate`)
+to stop leaning on synthetic data. Target **1000–2000 unique, labeled frames**.
+
+This plan answers the three operational questions up front: (1) where video data
+goes and how frames get labeled, (2) how to view the MLflow runs, (3) how much
+footage you need and how long each video should be.
 
 ---
 
-## 1. The Contract
+## 1. Where the Data Goes & How It Flows
 
-Every screenshot must end up as a labeled sample the pipeline already
-understands:
+There is one directory per pipeline layer, so a frame's path tells you its stage:
 
 ```
-capture → data/bronze/*.png          (raw screenshots)
-        → data/silver/*.json         (Silver features, via src.pipeline.silver)
-        → labels.csv                 (stem,label → "winning"|"losing"|"stalemate")
-        → data/gold/                 (consumed by src.pipeline.gold)
+data/videos/<name>.mp4          # raw recordings you add
+data/bronze/<stem>.png         # raw screenshots OR frames extracted from a VOD
+data/silver/<stem>_bronze.png  # Bronze-preprocessed frame (+ <stem>_bronze.json metadata)
+data/silver/<stem>_silver.json # Silver features (player_health, enemies, attacking, ...)
+data/gold/silver/*.json        # the same Silver features, pulled into the training set
+data/gold/labels.csv           # stem,label  <- source of truth for Gold labels
 ```
 
-The Gold layer already handles everything after capture: `process_image` writes
-the feature JSONs, `load_labeled_dataset` reads `labels.csv`, and
-`train_and_compare` trains + logs the leaderboard. **The only missing piece is
-the labeled screenshots themselves.**
+All paths are project-relative and defined in `src/config.py`
+(`BRONZE_DIR`, `SILVER_DIR`, `GOLD_DIR`). `.gitignore` keeps captured frames,
+models, outputs, and MLflow trees out of git (use `data/**/*.gitkeep`).
 
----
+### A. Adding video data
 
-## 2. What "Good Data" Looks Like
-
-Capture diversity is the single biggest quality lever. Target rough class
-distribution for Gold:
-
-| State      | Target share | How to get it                                    |
-|------------|--------------|--------------------------------------------------|
-| winning    | ~40%         | Duels you win; low enemy health moments          |
-| losing     | ~30%         | Duels you lose; deliberately fight stronger foes; spectate others' fights |
-| stalemate  | ~30%         | Opening exchanges, both at full health, neutral positions |
-
-Also vary the hidden variables the Silver CNN must learn:
-
-- **Match type**: 1v1, 2v2, and public-server chaos (1–3 enemies on screen)
-- **Health ranges**: full, half, slivers — the ratio matters, not just extremes
-- **States**: attacking (combos, ultimates), defending (blocking), damage
-  flashes (screen flash right as you get hit — these frames are rare, so the
-  capture rate matters)
-- **Visual variety**: different maps (Grass Field, Gym, Sewers, Tombs of the
-  Star...), different times of day if the map lighting changes, different
-  outfits (they change what "player" looks like to the CNN)
-
-**Filter OUT**: menus, loading screens, respawn/cutscene screens, and dead
-screens (player health 0). These are out-of-distribution noise.
-
----
-
-## 3. Capture Options (Discovery)
-
-| Option | Automation | Throughput | Effort | Verdict |
-|--------|-----------|------------|--------|---------|
-| **Windows screen-capture script (mss)** | Full auto while you play | 1 fps → ~2000+ unique frames/hour | Low | **Recommended** |
-| **Xbox Game Bar / OBS recording → ffmpeg frames** | Full auto, no script during play | Any fps you want | Low | Best passive option; also captures damage-flash frames reliably |
-| Roblox built-in F12 screenshot (`C:\Users\<you>\Pictures\Roblox`) | Manual | ~1 per keypress | Trivial | Good for spot-checking, too slow alone |
-| Spectate other players' fights | Manual (spectate after death) | Fast, diverse | Zero risk | Great source of **losing** frames |
-| Ranked/Casual Duels mode | Manual play | Controlled 1v1/2v2 | Low | Best for clean, balanced data |
-| YouTube/Twitch gameplay videos | Extract frames with ffmpeg | Huge | Copyright risk | **Supplement only** — not needed if you play |
-
-**Recommendation**: play Duels + public servers for ~1–2 hours total with the
-capture script running at 1 fps, and record with Xbox Game Bar or OBS for the
-same sessions as a fallback. Two capture sessions yield more raw frames than
-you need; dedup and filtering do the rest.
-
----
-
-## 4. Recommended Automated Capture Pipeline
-
-### 4.1 Capture (Windows side — Roblox runs on Windows, not WSL)
-
-New script: `scripts/capture_screenshots.py`, run with the **Windows** Python
-(`C:\Users\<you>\AppData\Local\Programs\Python\Python311\python.exe`), pip
-install `mss pynput`:
-
-- Grabs the full monitor (or just the Roblox window region) at a configurable
-  interval (default 1 fps — fast enough to catch damage flashes, slow enough
-  to avoid 10,000 near-identical frames)
-- Saves PNGs directly into the shared folder
-  `C:\Users\<you>\Documents\Coding\Game State Vision Predictor\data\capture\raw\`
-  so WSL sees them instantly (no copying)
-- Hotkeys while playing: **P** = pause, **S** = save a manual snapshot,
-  **Q** = quit
-- Skips a frame if it is nearly identical to the previous one (mean absolute
-  pixel difference below a threshold) — free dedup at capture time
-
-### 4.2 Extraction (if you recorded instead)
-
-One-liner per recording:
+1. Drop a **.mp4/.mov/.avi/.mkv/.webm/.flv** recording into `data/videos/`.
+2. Extract frames with the Bronze CLI:
 
 ```bash
-ffmpeg -i recording.mp4 -vf fps=1 -q:v 2 data/capture/raw/frame_%06d.png
+python -m src.pipeline.bronze --input data/videos/fight01.mp4 --output data/silver \
+    --frame-interval 60
 ```
 
-Then the same dedup pass (script `scripts/dedupe_frames.py` or a notebook
-cell) removes near-duplicates via a perceptual hash / pixel-diff threshold.
-Expect a ~5–10x reduction from raw frames to unique states.
+`--frame-interval` counts **source frames**, so use your recording's fps to get
+~1 extracted frame per second (60fps recording → `60`, 30fps → `30`). Default
+`1` means *every* frame, which at 60fps produces 60× the frames you want.
+Frames are written as `fight01_frame_%06d_bronze.png` + a metadata sidecar.
 
-### 4.3 Filter & move into the pipeline
+- Videos **over 15 minutes are rejected** (`MAX_VOD_DURATION_SEC`,
+  fails gracefully before writing any pixels). Keep recordings short.
+- Single screenshots are the zero-friction path: drop PNGs in `data/bronze/`.
 
-Once captured, every frame flows through existing code with zero new tooling:
+### SILVER in one line
 
 ```bash
-# move raw captures into the bronze intake
-cp data/capture/raw/*.png data/bronze/
-python -m src.pipeline.gold --data-root data/gold --synthetic 0  # (sanity check only)
+python -c "from src.pipeline.silver import process_frames; process_frames('data/silver/', 'data/gold/silver')"
 ```
 
-Run Bronze + Silver on all frames (Silver defaults are fine for now — the
-`player_health`/`num_enemies`/`attacking` fields drive the next step), then
-drop frames whose features are obviously OOD (player_health == 0.0, no health
-bar detected, or rule output flips every frame). A small notebook cell does
-this; keep the survivors in `data/gold/silver/`.
+`process_frames` reads every `*_bronze.png` and writes one
+`<stem>_silver.json` per frame (health ratio, round index, attacking/defending,
+damage flash, timestamps). It will also emit a `rounds.json`. Bronze's VOD
+naming and Silver's consumer naming match — both sides use the `_bronze.png`
+contract.
+
+### Screenshots only
+
+For a single screenshot: `src.pipeline.silver.process_image(<png>, <out_dir>)`
+writes `<stem>_silver.json` directly.
+
+### GOLD trains on real data
+
+```bash
+python -m src.pipeline.gold --data-root data/gold --experiment gold_classifier
+```
+
+`data/gold/` needs `silver/*.json` (auto-generated above) and `labels.csv`
+(ground truth). `--data-root data/gold` is what `train_and_compare()` uses.
 
 ---
 
-## 5. Labeling Strategy — The Efficiency Plan
+## 2. Labeling Extracted Frames (Bronze & Silver)
 
-Hand-labeling 2000 screenshots from scratch is slow. The plan makes humans
-label only the ~300–500 hardest frames:
+**Bronze needs no labeling.** It is just preprocessed frames — you only *filter*
+them (drop menus, loading screens, health-0/dead screens, respawn art screens.
+Those are out-of-distribution noise that the label rules cannot judge).
 
-### Step 1 — Rule bootstrap (free labels)
-`rule_based_label()` already assigns `winning/losing/stalemate` to every frame
-from the Silver features. It is right on easy cases (your health 100, theirs
-10 → "winning"). This is the starting point for every sample:
-`gold/silver/*.json` gets an embedded `label` key automatically.
+**Silver features are auto-extracted, not hand-labeled.** Each `_silver.json`
+already contains the health ratio, enemy count, attacking/defending state, and
+OCR confidence. What you hand-label is the *state* of the frame:
+`winning | losing | stalemate`.
 
-### Step 2 — Human review with active learning (label the informative ones)
-1. Review a small random batch (50–100 frames) in the review UI — confirm or
-   correct each rule-based label.
-2. Train the Gold zoo on reviewed data (`train_and_compare`).
-3. Predict the remaining unlabeled frames with the best model and **sort by
-   uncertainty** (probability closest to 0.33/0.33/0.33, or lowest max-prob).
-4. Review the most uncertain frames next — each correction retrains the
-   model, so the uncertain list keeps shrinking.
+### Label bootstrap (free labels)
 
-This concentrates human effort where the rules and model disagree, instead of
-re-verifying obvious cases.
+`rule_based_label()` (in `src/pipeline/gold.py`) assigns a provisional state to
+every frame from its Silver features — reliable on easy cases (your health full,
+theirs slivered → `winning`). It is the starting point for every sample.
 
-### Step 3 — Review tooling (next deliverable)
-A `notebooks/04_label_review.ipynb` batch-reviewer: shows N screenshots with
-the rule label + model probabilities, you type confirm/correct, it appends
-`labels.csv`. Approx 10–20 s per screenshot → 300 corrections ≈ 1–2 hours.
+### The human-in-the-loop loop
 
-### Step 4 — Silver annotations (second pass, later)
-The Gold labels get you a working classifier. To train the Silver CNN on real
-images you need per-frame annotations (player health, enemy bboxes) — too
-slow to hand-draw. Plan: hand-annotate ~100–200 frames (a rectangle per
-health bar, a flag per state) → train a first real SilverCNN → use it to
-auto-annotate the remaining 2000+ frames → human-verify only frames where the
-CNN is uncertain. Same active-learning loop, one layer down.
+1. **Filter OOD**: drop frames with `player_health == 0.0`, no health bar
+   detected, or a rule label that flips frame to frame.
+2. **Review a random batch** (~50–100): confirm or correct each rule label and
+   append rows to `data/gold/labels.csv` (`stem,label`).
+3. **Train the zoo** (`train_and_compare`) on reviewed rows.
+4. **Sort the rest by uncertainty** (lowest max-prob, i.e. closest to
+   `1/3,1/3,1/3`) and review the most uncertain next. Each iteration shrinks the
+   list. This concentrates the hour of hand-labeling on frames the rules/model
+   disagree about, instead of re-confirming obvious cases.
+
+`labels.csv` is the single source of truth — `load_labeled_dataset` prefers it
+over any embedded `label` key. Expect **~10–20 s/frame** of review.
+
+> **Not yet shipped**: `notebooks/04_label_review.ipynb` (batch reviewer that
+> shows frames + rule/model label + type confirm/correct → appends `labels.csv`).
+> Until it exists, label directly in a CSV editor or a notebook cell.
+
+### Silver CNN labels (later, optional)
+
+Training the Silver CNN on *real images* needs per-frame annotations (player
+health bar region, enemy boxes). Hand-graph ~100–200 frames → train a first
+CNN → auto-annotate the rest → verify only uncertain frames (same active loop,
+one layer down). Not required for the Gold state-reader.
 
 ---
 
-## 6. Time & Throughput Budget
+## 3. Viewing the MLflow Runs
+
+### Where runs are stored
+
+Every train/VOD-report run goes to the tracking store controlled by
+`MLFLOW_TRACKING_URI` **if set**, otherwise falls back to a SQLite DB under the
+temp dir (`sqlite:///tmp/mlruns/mlflow.db` — note `/tmp` is WSL's, wiped on
+restart).
+
+**Recommended: point MLflow at a project-local DB once** so runs are durable and
+the UI is a single command:
+
+```bash
+export MLFLOW_TRACKING_URI=sqlite:///mlruns/mlflow.db   # add to your shell rc
+```
+
+The `mlruns/` tree (DB + artifacts) is gitignored.
+
+### Start the UI
+
+```bash
+mlflow ui --backend-store-uri sqlite:///mlruns/mlflow.db
+# open http://127.0.0.1:5000
+```
+
+Use the same URI you exported; if you never exported, use
+`sqlite:////tmp/mlruns/mlflow.db`. Runs land in the same store regardless of how
+you invoke (CLI, notebook, web app) — `ensure_tracking_uri()` in
+`src/pipeline/report.py` guarantees it.
+
+### What you will see
+
+| Look here       | Experiment                | Runs logged by | Metrics | Artifacts |
+|---------|---------------------------|----------------|---------|-----------|
+| Model quality | `gold_classifier` / `gold_demo` | `train_gold_model`, `train_and_compare` | `accuracy`, `macro_f1`, `weighted_f1`, train counts per label | `confusion_matrix.png`, `classification_report.txt`, logged model |
+| Per-VOD reports | `gold_vod_report` | `log_vod_report` (via `process_vod_report`/CLI `--vod-report`) | event counts (`hit_landed`, `punishes`, …), `mean_ocr_confidence`, `score` | `timeline.json`, `stat_card.png` |
+| Silver CNN (later) | `silver_cnn` | `train_silver_model` | loss/val loss | checkpoint + params |
+| Params | — | every run | `vod_file` (filename), event thresholds, model meta | |
+
+**Model Registry tab**: the trained `state_reader` is registered & versioned
+(re-`Staging` → `Production`) by `src/pipeline/model_registry.py`; version the
+last run, promote it, and it becomes the one `load_state_reader()` returns.
+
+**Open notebooks**: `run_report_notebook.ipynb` is the interactive scratchpad;
+`notebooks/03_gold_modeling.ipynb` exercises the whole Gold layer against MLflow.
+
+---
+
+## 4. How Much Footage, and How Long Each Video
+
+### The ceiling: 15 minutes per VOD
+
+`MAX_VOD_DURATION_SEC = 900`. The pipeline rejects anything longer *before*
+framing pixels, so keep every recording under that.
+
+### The arithmetic
+
+- Bronze extracts **~1 frame/sec** (interval = your recording FPS).
+- A 10-min video → **~600 raw frames** → after dedup (~5–10× reduction;
+  idle moments repeat) → **60–150 unique frames**.
+- You need **1000–2000 unique labeled frames**. Therefore:
+
+> **10–20 videos × ~5–10 min each ≈ 2–4 hours of footage** covers the first
+> full dataset with a margin.
+
+Per-video guidance:
+
+- **3–10 min, one match set per clip.** Roblox duel rounds run ~2–3 min; keep
+  the clip boundary on whole matches so round framing is clean. Don't leave 1-hr
+  session captures — dedup overhead explodes and variety per frame drops.
+- **Variety is per-file, not per-minute**: flip duels (1v1/2v2), enemy difficulty,
+  and maps between clips. One long file is 1000s of similar frames; ten short
+  files give diversity for free.
+- **Record at 30–60fps.** Extraction samples to ~1 Hz anyway, but damage-flash
+  frames (the rarest and most valuable) are only citable if the source recorded
+  them.
+
+### Start small
+
+First iteration: **3 clips ≈ 20–30 min total** → run Bronze → Silver → tag the
+survivors → `train_and_compare`. Inspect the class balance + uncertainty in
+MLflow before scaling to the full 2–4 hours. Keep the first capture phase to ~30
+minutes of clips until you know (a) how many frames survive dedup, (b) how
+accurate the rule labels are, and (c) what the trainer's F1 looks like. Once
+that loop runs in minutes, scale up.
+
+---
+
+## 5. Target Class Distribution
+
+| State     | Target share | Get it by                                                        |
+|-----------|--------------|------------------------------------------------------------------|
+| winning   | ~40%         | Duels you win; enemy health slivered                            |
+| losing    | ~30%         | Duels you lose; fight deliberately stronger foes; **spectate others** |
+| stalemate | ~30%         | Opening exchanges, neutral positions, both near-full health      |
+
+Vary also: **match type** (1v1 / 2v2 / messy public server), **health ranges**
+(no slivers only — the *ratio* is the signal), **states** (attacking combos,
+blocking, hit flashes), **maps & outfits** (they change what "player" looks
+like).
+
+---
+
+## 6. Time Budget
 
 | Stage | Time | Output |
 |-------|------|--------|
-| Capture (2 sessions of play, 1 fps + recording) | 2–3 hours | 5,000–10,000 raw frames |
-| Dedup + filter (automated) | ~15 min | 1,500–2,500 unique usable frames |
-| Rule bootstrap + auto-feature extraction | ~15 min | All frames labeled (provisionally) |
-| Human review, active-learning order | 2–4 hours | 1,000–2,000 confirmed labels |
-| First real Gold model on real data | 15 min | Leaderboard in MLflow |
+| Play & record (10–15 clips × 5–10 min) | 2–4 hours | 800–2,000 raw frames after extraction+dedup |
+| Bronze → Silver over all clips | ~20 min | `*_silver.json` per frame |
+| Rule bootstrap + OOD filter | ~10 min | Provisional labels for all frames |
+| Human review (uncertainty order) | 2–4 hours | 1,000–2,000 rows in `labels.csv` |
+| `train_and_compare` on real data | ~15 min | leaderboard in MLflow `gold_classifier` |
 
-**Total: ~6–9 hours of calendar time**, of which ~4 are active play and ~2–4
-are focused labeling. Well inside a week of evening sessions.
+**~6–8 hours calendar time**, most of it play, then review.
 
 ---
 
@@ -176,31 +240,32 @@ are focused labeling. Well inside a week of evening sessions.
 
 | Phase | Deliverable | Done when |
 |-------|-------------|-----------|
-| 1 | `scripts/capture_screenshots.py` (Windows Python) | Captures 1 fps + hotkeys, writes PNGs to `data/capture/raw/` |
-| 2 | 30-min test capture + dedup script | ~1,000 unique frames survive dedup |
-| 3 | `notebooks/04_label_review.ipynb` review UI | Confirm/correct labels → `labels.csv` rows append |
-| 4 | Label in batches of 200–300 (uncertainty order) | `train_and_compare` macro-F1 stops improving (plateau) |
-| 5 | Production retrain on `data/gold` | Best model logged to MLflow; used by `predict()` |
-| 6 | (Later) 100–200 hand-annotated Silver frames | First real-data SilverCNN training run |
+| 1 | Fresh-volume capture (this doc) | `data/videos/` has 3–30 min of verified-playable clip |
+| 2 | Bronze→Silver→gold pass over clips | Frames flow end-to-end, no naming surprises |
+| 3 | `notebooks/04_label_review.ipynb` | Confirm/correct labels → `labels.csv` rows append |
+| 4 | Label 200–300 (uncertainty order) batches | `train_and_compare` macro-F1 plateaus |
+| 5 | Production retrain on `data/gold` | Best model promoted in MLflow registry, `predict()` uses it |
+| 6 | (Later) 100–200 hand-annotated Silver frames | First real-data `silver_cnn` run |
 
 ---
 
 ## 8. Pitfalls
 
-- **WSL vs Windows split**: Roblox only runs on Windows. Capture scripts must
-  run under Windows Python; WSL does all processing on the shared drive. Do
-  not try to capture from WSL.
-- **Class imbalance**: casual play is mostly stalemate/winning — losing frames
-  are the rare, most valuable ones. Spectate fights you lose, fight ranked
-  opponents, and check the class balance plot after every batch.
-- **Duplicate frames**: at 1 fps most frames still repeat (idle moments).
-  Always dedup; otherwise the model silently overweights idle states.
-- **Damage-flash frames**: they last a few frames — 1 fps might miss most of
-  them. The video-recording fallback (Xbox Game Bar) exists precisely for this.
-- **Out-of-distribution frames**: menus, respawn screens, and health-0 frames
-  will be labeled nonsense by the rules. Filter them before review.
-- **Resolution**: the Bronze layer resizes to 2560×1440, but capture at that
-  native resolution if possible (set monitor to 2560×1440 while playing) so
-  health bars keep full detail.
-- **Ownership**: only capture your own gameplay for training; do not scrape
-  and redistribute others' content.
+- **Frame-interval trap**: `1` extracts every frame (60fps in = 60 out). Use
+  `--frame-interval <recording_fps>` unless you really want every frame.
+- **15-minute veto**: respect `MAX_VOD_DURATION_SEC`; cut longer recordings
+  rather than fighting the pipeline.
+- **Naming contract**: Bronze writes `_bronze.png`, Silver consumes `_bronze.png`
+  and writes `_silver.json`. Hand-dropped files that don't follow the contract
+  are silently skipped by the globs.
+- **Class imbalance**: casual play over-weights stalemate/winning — spectate
+  fights you lose, and check `labels.csv` balance each batch.
+- **Duplicates**: near-identical idle frames always; dedup before labeling, or
+  the model silently overweights idle states.
+- **Damage flashes are rare**: capture at 30–60fps even though extraction is 1Hz.
+- **OOD frames**: menus / respawn / dead screens be filtered, else the rules
+  label nonsense.
+- **MLflow location**: the default temp store is wiped on WSL restart — export
+  `MLFLOW_TRACKING_URI=sqlite:///mlruns/mlflow.db` before running.
+- **Ownership**: capture your own gameplay; don't scrape or redistribute
+  others' footage.

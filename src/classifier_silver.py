@@ -506,16 +506,17 @@ def process_image(
 def process_frames(bronze_dir: Path | str, output_dir: Path | str) -> dict:
     """Run Silver over a Bronze frame stream and write per-frame JSON + rounds.
 
-    Expects ``*_{stem}_bronze.png`` files with matching sidecar JSONs (the
-    Bronze contract). Writes ``*_silver.json`` for every frame plus a
-    ``rounds.json`` aggregation into ``output_dir``. Damage also fires when the
-    player's health drops sharply between consecutive frames.
+    Expects Bronze-contract frame files (``*_bronze.png``, e.g.
+    ``<stem>_frame_%06d_bronze.png`` from ``process_vod``) with matching
+    sidecar JSONs (the Bronze contract). Writes ``*_silver.json`` for every
+    frame plus a ``rounds.json`` aggregation into ``output_dir``. Damage also
+    fires when the player's health drops sharply between consecutive frames.
     """
     bronze_dir = Path(bronze_dir)
     output_dir = Path(output_dir)
-    pngs = sorted(bronze_dir.glob("*_bronze_frame_*.png"))
+    pngs = sorted(bronze_dir.glob("*_bronze.png"))
     if not pngs:
-        raise ValueError(f"no bronze frames (*_bronze_frame_*.png) found in {bronze_dir}")
+        raise ValueError(f"no bronze frames (*_bronze.png) found in {bronze_dir}")
 
     states: list[SilverFeatures] = []
     prev_health: float | None = None
@@ -537,7 +538,7 @@ def process_frames(bronze_dir: Path | str, output_dir: Path | str) -> dict:
 
     frame_artifacts = []
     for state in tagged:
-        name = Path(state.image_path).name.replace("_bronze_", "_silver_").replace(".png", ".json")
+        name = Path(state.image_path).name.replace("_bronze.png", "_silver.json")
         json_path = output_dir / name
         _write_json(json_path, asdict(state))
         frame_artifacts.append(
