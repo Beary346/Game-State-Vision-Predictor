@@ -7,10 +7,19 @@ Detect and predict "game state" combinations from fighting game footage. A free 
 Raw match VODs of **Jujutsu Shenanigans (Roblox)**, recorded at playback resolution H=1920, W=1080 (Standard desktop resolution). A single-frame "state check" mode (single screenshot) stays as the zero-friction demo entry.
 
 ## Outputs
-Machine output categorized as `winning`, `losing`, or `stalemate`, based on the per-frame game state:
+Machine output categorized as `winning`, `losing`, or `stalemate` — the player's
+**local initiative** per frame, labeled by whoever reviews the Silver data:
+- `winning`   = the player is currently striking the enemy
+- `losing`    = the player is currently being hit
+- `stalemate` = nothing is happening (neutral / defending)
+
+These states are predicted from per-frame Silver features:
 - **Health ratio** (player vs enemy)
 - **Aggression** (is the player attacking?)
 - **Defense** (how is the player defending?)
+
+Health stays an input feature but is deliberately *not* part of the label; the
+event layer separately owns the health narrative (hits, punishes, round wins).
 
 Delivered as a quantified match report:
 - **Event timeline** (health-drop hits, whiffs, punishes, round losses, domain deployments)

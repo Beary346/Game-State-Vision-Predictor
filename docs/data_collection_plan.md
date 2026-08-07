@@ -121,13 +121,20 @@ Those are out-of-distribution noise that the label rules cannot judge).
 **Silver features are auto-extracted, not hand-labeled.** Each `_silver.json`
 already contains the health ratio, enemy count, attacking/defending state, and
 OCR confidence. What you hand-label is the *state* of the frame:
-`winning | losing | stalemate`.
+
+- `winning`   = the player is currently striking the enemy
+- `losing`    = the player is currently being hit (wins the overlap with striking)
+- `stalemate` = nothing is happening (neutral / defending)
+
+The label is **local initiative**, not health advantage — a 1-HP player landing
+hits is `winning`, a full-HP player locked in a combo is `losing`.
 
 ### Label bootstrap (free labels)
 
 `rule_based_label()` (in `src/pipeline/gold.py`) assigns a provisional state to
-every frame from its Silver features — reliable on easy cases (your health full,
-theirs slivered → `winning`). It is the starting point for every sample.
+every frame from its initiator features (`winning` if `attacking`, `losing` if
+`damage_indicator`, else `stalemate`) — a fast bootstrap for easy frames. It is
+the starting point for every sample.
 
 ### The human-in-the-loop loop
 
@@ -263,14 +270,14 @@ that loop runs in minutes, scale up.
 
 | State     | Target share | Get it by                                                        |
 |-----------|--------------|------------------------------------------------------------------|
-| winning   | ~40%         | Duels you win; enemy health slivered                            |
-| losing    | ~30%         | Duels you lose; fight deliberately stronger foes; **spectate others** |
-| stalemate | ~30%         | Opening exchanges, neutral positions, both near-full health      |
+| winning   | ~40%         | Clips where you're landing hits — attacking/full combos          |
+| losing    | ~30%         | Clips where you get knocked around, trapped in combos; **spectate others** |
+| stalemate | ~30%         | Opening exchanges, footsies, guarding behind either sideline     |
 
 Vary also: **match type** (1v1 / 2v2 / messy public server), **health ranges**
-(no slivers only — the *ratio* is the signal), **states** (attacking combos,
-blocking, hit flashes), **maps & outfits** (they change what "player" looks
-like).
+(no slivers only — the *ratio* is a feature, not the label), **initiative
+states** (striking, blocking, hit flashes — these define the label), **maps &
+outfits** (they change what "player" looks like).
 
 ---
 

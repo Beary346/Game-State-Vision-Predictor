@@ -57,6 +57,8 @@
   #featBox { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px;
              margin-top: 10px; font-size: 13px; }
   .feat { color: var(--muted); } .feat b { color: var(--text); font-weight: 500; }
+  #legend { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  #legend b.ok { color: var(--win); } #legend b.bad { color: var(--lose); } #legend b.mid { color: var(--stalemate); }
   kbd { background: #222b33; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--muted); }
 </style>
 </head>
@@ -102,6 +104,9 @@
         <div class="feat"><b>Round @ time</b><br/><span id="fRound">–</span></div>
         <div class="feat"><b>Frame</b><br/><span id="fFrame">–</span></div>
       </div>
+      <div id="legend"><b class="ok">winning</b> = you&rsquo;re striking &middot;
+        <b class="bad">losing</b> = you&rsquo;re taking damage &middot;
+        <b class="mid">stalemate</b> = nothing happening (defending counts here)</div>
       <div style="margin-top:6px;color:var(--muted);font-size:11px">
         <kbd>1</kbd>win · <kbd>2</kbd>lose · <kbd>3</kbd>stale · <kbd>s</kbd>skip · <kbd>u</kbd>undo ·
         <kbd>n</kbd>/<kbd>p</kbd>nav · <kbd>e</kbd>export

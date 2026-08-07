@@ -32,7 +32,7 @@ from src.pipeline.silver import SilverFeatures
 
 @pytest.fixture
 def winning_features() -> dict:
-    """A clearly winning state: high player health vs. a weak enemy, attacking."""
+    """A clearly winning state: the player is striking (attacking)."""
     return {
         "image_path": "/fake/screenshot.png",
         "player_health": 0.8,
@@ -54,7 +54,7 @@ def winning_features() -> dict:
 
 @pytest.fixture
 def losing_features() -> dict:
-    """A clearly losing state: low player health, healthy enemies, taking damage."""
+    """A clearly losing state: the player is being hit (damage flash)."""
     return {
         "image_path": "/fake/screenshot.png",
         "player_health": 0.2,
@@ -82,7 +82,7 @@ def losing_features() -> dict:
 
 @pytest.fixture
 def stalemate_features() -> dict:
-    """A balanced state: equal health, no attack/defense signals."""
+    """A neutral state: no attack, no damage flash — nothing is happening."""
     return {
         "image_path": "/fake/screenshot.png",
         "player_health": 0.5,
@@ -201,7 +201,37 @@ class TestRuleBasedLabel:
             "damage_indicator": True,
             "num_enemies": 0,
         }
+        # Player is attacking AND being hit -> being hit wins the overlap.
         assert rule_based_label(sf) == "losing"
+
+    def test_defending_alone_is_stalemate(self):
+        sf = {
+            "player_health": 0.5,
+            "player_position": [0.5, 0.5],
+            "enemies": [],
+            "attacking": False,
+            "defending": True,
+            "damage_indicator": False,
+            "num_enemies": 0,
+        }
+        # Guards don't decide the label: defensive posture is neutral.
+        assert rule_based_label(sf) == "stalemate"
+
+    def test_health_alone_does_not_decide(self):
+        # Full health vs slivered enemy with no exchange at all is still
+        # stalemate -- the label is initiative-only, health drives nothing.
+        sf = {
+            "player_health": 0.99,
+            "player_position": [0.5, 0.5],
+            "enemies": [{"health": 0.05}],
+            "attacking": False,
+            "defending": False,
+            "damage_indicator": False,
+            "num_enemies": 1,
+        }
+        assert rule_based_label(sf) == "stalemate"
+        sf["player_health"] = 0.01
+        assert rule_based_label(sf) == "stalemate"
 
     def test_deterministic(self, winning_features):
         assert rule_based_label(winning_features) == rule_based_label(winning_features)

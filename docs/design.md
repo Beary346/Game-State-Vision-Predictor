@@ -255,15 +255,22 @@ The Gold layer ignores pixels entirely. It trains a classifier on the structured
 
 | Input Feature | Why It Helps |
 |---------------|-------------|
-| `player_health` | Core signal: low health → losing |
-| `num_enemies` | Outnumbered → losing |
-| `enemies[i].health` | Weak enemies → winning |
-| `attacking` | Aggression = taking initiative |
-| `defending` | Defense = reactive, probably losing |
-| `damage_indicator` | Recent damage → losing |
+| `player_health` | Health context (a feature, not the label target) |
+| `num_enemies` | Reads the pressure / numbers situation |
+| `enemies[i].health` | Enemy gut health context |
+| `attacking` | Aggression = the player is striking → `winning` |
+| `defending` | Guards = reactive posture → part of neutral `stalemate` |
+| `damage_indicator` | Flash / taking damage → `losing` |
+
+The label tracks the player's **local initiative**, not health advantage:
+
+- `winning`   = the player is striking the enemy
+- `losing`    = the player is being hit (takes priority over attacking on overlap)
+- `stalemate` = nothing is happening (neutral / defending)
 
 The classifier (scikit-learn, XGBoost, or a small PyTorch MLP) produces one of
-three labels: `winning`, `losing`, `stalemate`.
+three labels: `winning`, `losing`, `stalemate`. Health stays in the feature
+vector for the model to use if it helps, but it does not define the truth label.
 
 ### Why separate the classifier from the CNN?
 

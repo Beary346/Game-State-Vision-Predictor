@@ -22,10 +22,15 @@ Feature vector layout (see ``FEATURE_NAMES``):
     player_health, mean_enemy_health, min_enemy_health, health_ratio,
     num_enemies, attacking, defending, damage_indicator
 
-Labels follow AGENTS.md definitions:
-    - winning    player has the advantage (health ratio + aggression)
-    - losing     player is at a disadvantage (low health / taking damage)
-    - stalemate  roughly even
+Labels are the player's *local initiative*, not health advantage:
+    - winning    the player is currently striking the enemy (``attacking``)
+    - losing     the player is currently being hit (``damage_indicator``)
+    - stalemate  nothing is happening -- neutral, defending, no exchange
+
+Health stays in the feature vector but is deliberately *not* part of the label:
+a player on 1% HP who lands a strike is "winning" and one at 90% HP being
+comboed is "losing". The event layer separately captures the health narrative
+(hits landed, punishes, round outcomes).
 """
 
 import argparse
@@ -119,51 +124,56 @@ def features_to_vector(silver_features: dict) -> np.ndarray:
 
 
 def rule_based_label(silver_features: dict) -> str:
-    """Deterministic state label mirroring AGENTS.md's definitions.
+    """Deterministic initiative-based state label (matches the human labeler).
 
-    Priority order (losing conditions win over winning ones):
-    1. Player health very low, or the enemy is much healthier (ratio <= 0.7),
-       or the player is taking damage while below half health  → losing
-    2. Health ratio >= 1.3 while not defending, or attacking with a
-       positive ratio (> 1.0)                                 → winning
-    3. Anything else                                          → stalemate
+    ``winning`` = the player is landing hits (attacking),
+    ``losing`` = the player is getting hit (damage flash), and
+    ``stalemate`` = nothing is happening (neutral / defending).
+
+    Priority order:
+    1. Being hit wins over attacking -- a frame where both fire (trading hits,
+       locked in a combo) reads as "losing" because the player is on the
+       receiving end regardless of what they throw.
+    2. Otherwise, actively attacking is "winning".
+    3. Everything else (health levels, defending posture) is "stalemate".
+
+    Health is deliberately ignored: the label describes initiative, and the
+    event layer owns the health narrative separately.
     """
-    player_health = float(silver_features["player_health"])
-    ratio = compute_health_ratio(silver_features)
     damage = bool(silver_features.get("damage_indicator", False))
-    defending = bool(silver_features.get("defending", False))
     attacking = bool(silver_features.get("attacking", False))
 
-    if player_health < 0.2 or ratio <= 0.7 or (damage and player_health < 0.5):
+    if damage:
         return "losing"
-    if (ratio >= 1.3 and not defending) or (attacking and ratio >= 1.0):
+    if attacking:
         return "winning"
     return "stalemate"
 
 
 def _sample_features_for_label(rng: np.random.Generator, label: str, idx: int) -> dict:
-    """Draw random SilverFeatures values that rule_based_label maps to *label*."""
+    """Draw random SilverFeatures values that rule_based_label maps to *label*.
+
+    Since the label rules are initiative-based (damage/attack flags), the
+    synthesized flags are set so ``rule_based_label`` reproduces *label*:
+    losing = damage flash (priority), winning = attacking, stalemate = neither.
+    Health and enemy values stay randomized -- they are informative features
+    but do not drive the synthetic label.
+    """
     num_enemies = int(rng.integers(1, 3))
 
     enemy_healths: list[float] = []
     for _ in range(num_enemies):
-        if label == "winning":
-            health = float(rng.uniform(0.1, 0.45))
-        elif label == "losing":
-            health = float(rng.uniform(0.65, 0.95))
-        else:
-            health = float(rng.uniform(0.45, 0.55))
+        health = float(rng.uniform(0.1, 0.95))
         enemy_healths.append(health)
 
+    player_health = float(rng.uniform(0.05, 0.95))
+
     if label == "winning":
-        player_health = float(rng.uniform(0.65, 0.95))
-        attacking, defending, damage_indicator = bool(rng.integers(0, 2)), False, False
+        attacking, defending, damage_indicator = True, False, False
     elif label == "losing":
-        player_health = float(rng.uniform(0.05, 0.3))
-        attacking, defending, damage_indicator = False, bool(rng.integers(0, 2)), bool(rng.integers(0, 2))
+        attacking, defending, damage_indicator = False, bool(rng.integers(0, 2)), True
     else:
-        player_health = float(rng.uniform(0.45, 0.55))
-        attacking, defending, damage_indicator = False, False, False
+        attacking, defending, damage_indicator = False, bool(rng.integers(0, 2)), False
 
     enemies: list[dict] = []
     for health in enemy_healths:

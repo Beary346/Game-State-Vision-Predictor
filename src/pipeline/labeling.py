@@ -135,6 +135,24 @@ def iter_scaffolds(labeling_dir: str | Path, load: bool = True) -> list[tuple[st
     return result
 
 
+def refresh_rule_labels(labeling_dir: str | Path) -> dict:
+    """Recompute ``rule_label`` on every scaffold in place.
+
+    Scaffolds are copies of Silver features plus reviewer fields, so the rule
+    bootstrap can be recomputed straight from the scaffold dict. Human
+    ``label`` / ``skip`` answers are left untouched.
+    """
+    labeling_dir = Path(labeling_dir)
+    refreshed = 0
+    for stem, payload in iter_scaffolds(labeling_dir, load=True):
+        new_rule = rule_based_label(payload)
+        if payload.get("rule_label") != new_rule:
+            payload["rule_label"] = new_rule
+            _write_json(labeling_dir / f"{stem}_labeling.json", payload)
+            refreshed += 1
+    return {"refreshed": refreshed, "total": len(iter_scaffolds(labeling_dir, load=False))}
+
+
 def valid_label(value) -> str | None:
     """``value`` normalized and returned when it is one of STATE_LABELS, else ``None``."""
     candidate = str(value).strip().lower()
@@ -186,6 +204,7 @@ def export_labels_csv(labeling_dir: str | Path, csv_path: str | Path) -> dict:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Gold labeling scaffold tooling")
     ap.add_argument("--init", action="store_true", help="create empty scaffolds for every Silver JSON")
+    ap.add_argument("--refresh-rules", action="store_true", help="recompute rule_label on existing scaffolds")
     ap.add_argument("--summary", action="store_true", help="print labeling progress counts")
     ap.add_argument("--export", action="store_true", help="write labels.csv from labeled scaffolds")
     ap.add_argument("--silver", default="data/gold/silver", help="Silver JSON directory")
@@ -198,6 +217,9 @@ if __name__ == "__main__":
         print(
             f"Scaffolds: {res['created']} created, {res['existing']} unchanged, {res['total']} total"
         )
+    if args.refresh_rules:
+        res = refresh_rule_labels(args.labeling)
+        print(f"Rule labels: {res['refreshed']} updated, {res['total']} scaffolds present")
     if args.summary:
         res = summary(args.labeling)
         print(
