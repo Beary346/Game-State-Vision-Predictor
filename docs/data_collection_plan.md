@@ -112,6 +112,71 @@ add new VODs.
 
 ---
 
+## 1b. Train the model — and use it on footage it was never trained on
+
+### Train through MLflow (one command)
+
+```bash
+export MLFLOW_TRACKING_URI=sqlite:///mlruns/mlflow.db   # once per shell
+
+# ⑥ train every model in the zoo + compare under MLflow
+python -m src.pipeline.gold --data-root data/gold
+
+# ...or train AND promote the winner straight to the Production registry
+python -m src.pipeline.gold --data-root data/gold --register-best
+```
+
+`--data-root data/gold` needs `silver/*.json` (auto-generated) and `labels.csv`
+(your exported labels). `train_and_compare()` races all 6 models, logs each run
+(confusion matrix, classification report, logged model) plus a leaderboard run,
+then prints the rankings. `--register-best` registers the leaderboard winner as
+a versioned MLflow model called `state_reader` and moves it to **Production**.
+
+### Run the model on a brand-new VOD (outside data not trained on)
+
+A VOD that was *never part of the training set* — just drop it in and run it:
+
+```bash
+# One command: Bronze extract -> Silver features -> classify with the
+# registered production state-reader -> timeline + stat card + MLflow run.
+python -m src.pipeline.gold \
+    --infer-vod data/videos/your_new_match.mp4 \
+    --experiment gold_vod_report
+```
+
+- Uses the **Production** `state_reader` automatically (fallback: rule-based
+  labels until you've trained + registered one).
+- `--infer-interval N` samples every N frames (default: the VOD's fps ≈ 1
+  frame/sec). `--infer-model models:/state_reader/3` overrides the model.
+- Result: `outputs/gold_<name>/timeline.json` + `stat_card.png`, tracked as an
+  MLflow run under `gold_vod_report` (params: VOD file; metrics: event counts,
+  mean OCR confidence, score; artifacts: timeline + stat card).
+
+### Inspect it in the MLflow UI
+
+```bash
+mlflow ui --backend-store-uri sqlite:///mlruns/mlflow.db   # open http://127.0.0.1:5000
+```
+
+- `gold_classifier` — the training runs + leaderboard (compare accuracy/F1).
+- `gold_vod_report` — one run per processed VOD, with the timeline JSON and
+  stat card downloadable from the run's Artifacts tab.
+- **Models → `state_reader`** — the versioned state-reader; every version keeps
+  its training metrics as tags, and the Production version is what `--infer-vod`
+  uses.
+
+### Reference: programmatic equivalents
+
+```python
+from src.pipeline.gold import infer_new_vod, register_best_model, train_and_compare
+
+leaderboard = train_and_compare("data/gold")            # returns ranked DataFrame
+register_best_model(leaderboard)                        # -> state_reader Production
+report = infer_new_vod("data/videos/fresh_match.mp4")   # -> dict with run_id, score
+```
+
+---
+
 ## 2. Labeling Extracted Frames (Bronze & Silver)
 
 **Bronze needs no labeling.** It is just preprocessed frames — you only *filter*

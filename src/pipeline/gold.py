@@ -707,6 +707,107 @@ def predict(features, model) -> tuple[str, dict[str, float]]:
     return STATE_LABELS[pred_idx], probs
 
 
+# ── Train -> register -> use on unseen VODs ──────────────────────────────────
+
+
+def register_best_model(
+    leaderboard: pd.DataFrame,
+    *,
+    name: str = "state_reader",
+    stage: str = "Production",
+) -> dict:
+    """Register the leaderboard winner as a versioned MLflow model.
+
+    ``train_and_compare`` returns a leaderboard sorted by macro-F1 (best first);
+    this takes the top row, registers its logged model under ``name`` (default
+    ``state_reader``), stamps the training metrics as version tags, and moves it
+    straight to the requested stage (Production by default) so inference on new
+    VODs picks it up via ``load_state_reader``.
+
+    Returns the model-registry version summary dict.
+    """
+    if leaderboard is None or leaderboard.empty:
+        raise ValueError("empty leaderboard: nothing to register (train first?)")
+
+    from src.pipeline.model_registry import register_state_reader
+
+    winner = leaderboard.iloc[0]
+    result = register_state_reader(
+        winner["model_path"],
+        name=name,
+        stage=stage,
+        tags={
+            "model_name": str(winner["model_name"]),
+            "accuracy": str(float(winner["accuracy"])),
+            "macro_f1": str(float(winner["macro_f1"])),
+            "weighted_f1": str(float(winner["weighted_f1"])),
+            "run_id": str(winner.get("run_id", "")),
+        },
+    )
+    print(
+        f"Registered {name} v{result['version']} ({winner['model_name']}) "
+        f"-> {stage} (run {result['run_id']})"
+    )
+    return result
+
+
+def infer_new_vod(
+    vod_file: str,
+    *,
+    model=None,
+    frame_interval: int | None = None,
+    output_dir: str | None = None,
+    experiment_name: str = "gold_vod_report",
+    run_name: str | None = None,
+    event_kwargs: dict | None = None,
+) -> dict:
+    """Run a brand-new VOD through Bronze -> Silver -> Gold and return its MLflow report.
+
+    The one-stop entry point for *outside data*: a VOD that was never part of
+    the training set. It extracts frames (Bronze), reads the HUD features
+    (Silver), classifies every frame with the supplied ``model`` (or the
+    registered production ``state_reader``, or the deterministic rules when no
+    model exists), then produces the timeline + stat card + per-VOD MLflow run.
+
+    ``frame_interval`` defaults to the VOD's fps (≈1 sampled frame per second),
+    matching the data-collection convention.
+    """
+    from src.ingestor_bronze import get_vod_info, process_vod
+    from src.pipeline.silver import process_frames
+
+    if not Path(vod_file).exists():
+        raise FileNotFoundError(f"VOD not found: {vod_file}")
+
+    vod_meta = get_vod_info(vod_file)
+    interval = frame_interval if frame_interval is not None else round(vod_meta.fps)
+
+    classifier = model
+    if classifier is None:
+        try:
+            from src.pipeline.model_registry import load_state_reader
+
+            classifier = load_state_reader()  # registered Production state-reader
+        except RuntimeError:
+            classifier = None  # no registered model yet -> rule-based fallback
+
+    with tempfile.TemporaryDirectory(prefix="gsvp_infer_") as tmp:
+        bronze_dir = str(Path(tmp) / "bronze")
+        silver_dir = str(Path(tmp) / "silver")
+        process_vod(vod_file, bronze_dir, frame_interval=interval)
+        process_frames(bronze_dir, silver_dir)
+        states = load_states_from_dir(silver_dir)
+
+    return process_vod_report(
+        states=states,
+        model=classifier,
+        vod_file=vod_file,
+        output_dir=output_dir,
+        experiment_name=experiment_name,
+        run_name=run_name,
+        event_kwargs=event_kwargs,
+    )
+
+
 # ── Per-stream classification & end-to-end VOD reports ───────────────────────
 
 
@@ -831,7 +932,35 @@ if __name__ == "__main__":
     ap.add_argument("--vod-report", action="store_true", help="process a VOD's silver state JSONs into a match report")
     ap.add_argument("--states-dir", default=None, help="directory of *_silver.json state files (for --vod-report)")
     ap.add_argument("--states-model", default=None, help="'run:ID/model' URI of a trained state-reader (for --vod-report)")
+    ap.add_argument("--infer-vod", default=None, help="raw VOD path to run end-to-end (Bronze -> Silver -> Gold report) on unseen footage")
+    ap.add_argument("--infer-model", default=None, help="'run:ID/model' or 'models:/state_reader/1' URI for --infer-vod (default: registered production state-reader, else rules)")
+    ap.add_argument("--infer-interval", type=int, default=None, help="frame interval for --infer-vod (default: VOD fps)")
+    ap.add_argument("--register-best", action="store_true", help="register the leaderboard winner as the production state_reader after training")
     args = vars(ap.parse_args())
+
+    if args["infer_vod"]:
+        if not Path(args["infer_vod"]).exists():
+            ap.error(f"--infer-vod path not found: {args['infer_vod']}")
+        model = None
+        if args["infer_model"]:
+            model = mlflow.sklearn.load_model(args["infer_model"])
+        result = infer_new_vod(
+            args["infer_vod"],
+            model=model,
+            frame_interval=args["infer_interval"],
+            experiment_name=args["experiment"],
+            event_kwargs={},
+        )
+        print(f"\nScore {result['score']:.0f}/100 for {result['vod_file']}")
+        print(
+            f"  hits {result['headline']['hits_landed']}  punishes {result['headline']['punishes']}"
+            f"  whiffs {result['headline']['whiffs']}  rounds {result['headline']['round_wins']}W "
+            f"{result['headline']['round_losses']}L"
+        )
+        print(f"Timeline : {result['timeline_json']}")
+        print(f"Stat card: {result['stat_card']}")
+        print(f"MLflow run: {result['run_id']} ({result['experiment_name']})")
+        raise SystemExit(0)
 
     if args["vod_report"]:
         if not args["states_dir"]:
@@ -886,3 +1015,5 @@ if __name__ == "__main__":
         print("\nLeaderboard (sorted by macro-F1):")
         print(leaderboard[["model_name", "accuracy", "macro_f1", "weighted_f1"]].to_string(index=False))
         print(f"\nBest model: {leaderboard.iloc[0]['model_name']}")
+        if args["register_best"]:
+            register_best_model(leaderboard, name="state_reader")
