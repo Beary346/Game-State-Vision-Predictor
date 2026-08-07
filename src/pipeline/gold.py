@@ -62,10 +62,19 @@ from src.pipeline.events_gold import detect_events
 from src.pipeline.report import ensure_tracking_uri, log_vod_report
 from src.pipeline.silver import H, W
 
-# The three plain-English game states produced by the Gold layer.
-STATE_LABELS: tuple[str, str, str] = ("winning", "losing", "stalemate")
+# The six plain-English game states produced by the Gold layer.
+STATE_LABELS: tuple[str, ...] = (
+    "winning",
+    "losing",
+    "stalemate",
+    "searching",
+    "won",
+    "lost",
+)
 
-# Order must match the vector produced by features_to_vector().
+# Order must match the vector produced by features_to_vector(). The base
+# features carry the Silver HUD reads; the ``*_x_*`` names are NVIDIA-style
+# feature crosses (combinations that carry more signal than either part alone).
 FEATURE_NAMES: tuple[str, ...] = (
     "player_health",
     "mean_enemy_health",
@@ -75,6 +84,48 @@ FEATURE_NAMES: tuple[str, ...] = (
     "attacking",
     "defending",
     "damage_indicator",
+    # Added: sprite geometry + per-ability cooldown states.
+    "player_position_x",
+    "player_position_y",
+    "cooldown_0",
+    "cooldown_1",
+    "cooldown_2",
+    "cooldown_3",
+    "domain_ready",
+    # Added: best-effort sprite/domain states (fixable in the labeler).
+    "player_ragdoll",
+    "enemy_ragdoll",
+    "player_ultimate",
+    "enemy_ultimate",
+    "domain_active",
+    "domain_activating",
+    # NVIDIA-style feature crosses (combination features).
+    "player_health_x_health_ratio",
+    "player_health_x_player_position_x",
+    "attacking_x_health_ratio",
+    "defending_x_health_ratio",
+    "player_ragdoll_x_player_health",
+    "enemy_ragdoll_x_health_ratio",
+    "attacking_x_num_enemies",
+    "domain_active_x_attacking",
+)
+
+# How context fields (human observations) map onto Silver feature names so a
+# labeler-confirmed value can correct a misread feature at training time.
+CONTEXT_FEATURE_MAP: dict[str, str] = {
+    "player_ragdolled": "player_ragdoll",
+    "enemy_ragdolled": "enemy_ragdoll",
+    "player_ultimate_active": "player_ultimate",
+    "enemy_ultimate_active": "enemy_ultimate",
+    "domain_active": "domain_active",
+}
+
+# Context fields that inform labeling but are not themselves model features.
+CONTEXT_NOTES: tuple[str, ...] = (
+    "enemy_visible",
+    "player_moving",
+    "round_start",
+    "round_end",
 )
 
 _EPS = 1e-12
@@ -97,52 +148,118 @@ def compute_health_ratio(silver_features: dict) -> float:
 
 
 def features_to_vector(silver_features: dict) -> np.ndarray:
-    """Convert a SilverFeatures dict into the fixed 8-dim float32 Gold vector."""
+    """Convert a SilverFeatures dict into the fixed Gold float32 vector.
+
+    The vector layout must match ``FEATURE_NAMES`` exactly. Base reads default
+    safely on old feature dicts; the trailing ``*_x_*`` entries are feature
+    crosses (NVIDIA-style combination features) computed here so the model sees
+    e.g. ``player_health * health_ratio`` as one input.
+    """
     enemies = silver_features.get("enemies", [])
     enemy_healths = [float(e["health"]) for e in enemies]
     mean_enemy_health = float(np.mean(enemy_healths)) if enemy_healths else 0.0
     min_enemy_health = float(np.min(enemy_healths)) if enemy_healths else 0.0
-    player_health = float(silver_features["player_health"])
-
+    health = float(silver_features.get("player_health", 0.0))
     # Compute the ratio in float64 (Python floats) so the cast to float32
     # below only rounds once instead of accumulating float32 division error.
-    health_ratio = player_health / (mean_enemy_health + _EPS)
+    health_ratio = health / (mean_enemy_health + _EPS)
+
+    cooldowns = list(silver_features.get("ability_cooldowns", []))
+    if len(cooldowns) < 4:
+        # Old feature dicts had no per-slot cooldowns; fall back to the
+        # single domain_ready boolean they carried.
+        domain_ready = bool(silver_features.get("domain_ready", False))
+        cooldowns = [float(domain_ready)] * 4
+
+    pos = silver_features.get("player_position", (0.5, 0.5))
+    if isinstance(pos, dict):
+        pos = (pos.get("x", 0.5), pos.get("y", 0.5))
+    elif len(pos) >= 2:
+        pos = (float(pos[0]), float(pos[1]))
+    else:
+        pos = (0.5, 0.5)
+
+    attacking = float(bool(silver_features.get("attacking", False)))
+    defending = float(bool(silver_features.get("defending", False)))
+    damage = float(bool(silver_features.get("damage_indicator", False)))
+    player_ragdoll = float(bool(silver_features.get("player_ragdoll", False)))
+    enemy_ragdoll = float(bool(silver_features.get("enemy_ragdoll", False)))
+    domain_active = float(bool(silver_features.get("domain_active", False)))
+    num_enemies = float(silver_features.get("num_enemies", len(enemies)))
 
     return np.array(
         [
-            player_health,
+            health,
             mean_enemy_health,
             min_enemy_health,
             health_ratio,
-            float(silver_features.get("num_enemies", len(enemies))),
-            float(bool(silver_features.get("attacking", False))),
-            float(bool(silver_features.get("defending", False))),
-            float(bool(silver_features.get("damage_indicator", False))),
+            num_enemies,
+            attacking,
+            defending,
+            damage,
+            pos[0],
+            pos[1],
+            float(cooldowns[0]),
+            float(cooldowns[1]),
+            float(cooldowns[2]),
+            float(cooldowns[3]),
+            float(bool(silver_features.get("domain_ready", all(c >= 0.95 for c in cooldowns)))),
+            player_ragdoll,
+            enemy_ragdoll,
+            float(bool(silver_features.get("player_ultimate", False))),
+            float(bool(silver_features.get("enemy_ultimate", False))),
+            domain_active,
+            float(bool(silver_features.get("domain_activating", False))),
+            # ── Feature crosses ──
+            health * health_ratio,
+            health * pos[0],
+            attacking * health_ratio,
+            defending * health_ratio,
+            player_ragdoll * health,
+            enemy_ragdoll * health_ratio,
+            attacking * num_enemies,
+            domain_active * attacking,
         ],
         dtype=np.float32,
     )
 
 
+# Health at or below this fraction counts as "dead" for the won/lost rules.
+DEATH_HEALTH_THRESHOLD = 1e-3
+
+
 def rule_based_label(silver_features: dict) -> str:
     """Deterministic initiative-based state label (matches the human labeler).
 
-    ``winning`` = the player is landing hits (attacking),
-    ``losing`` = the player is getting hit (damage flash), and
-    ``stalemate`` = nothing is happening (neutral / defending).
+    Six states, decided in priority order — the first match wins:
 
-    Priority order:
-    1. Being hit wins over attacking -- a frame where both fire (trading hits,
-       locked in a combo) reads as "losing" because the player is on the
-       receiving end regardless of what they throw.
-    2. Otherwise, actively attacking is "winning".
-    3. Everything else (health levels, defending posture) is "stalemate".
+    1. ``lost``      player health hit zero (death moment frames)
+    2. ``searching`` no opponent is on the frame (no enemies detected)
+    3. ``won``       enemy health hit zero (kill moment frames; needs an enemy)
+    4. ``losing``    player is getting hit (damage flash)
+    5. ``winning``   player is landing hits (attacking)
+    6. ``stalemate`` nothing is happening (neutral / defending)
 
-    Health is deliberately ignored: the label describes initiative, and the
-    event layer owns the health narrative separately.
+    Health is deliberately ignored for the three fight states (a player on 1%
+    HP landing a strike is still "winning" — the event layer owns the health
+    narrative), but defines the terminal ``won`` / ``lost`` death moments.
     """
+    player_health = float(silver_features.get("player_health", 0.0))
+    enemies = silver_features.get("enemies", [])
+    if not enemies:
+        min_enemy_health = 0.0
+    else:
+        enemy_healths = [float(e["health"]) for e in enemies]
+        min_enemy_health = float(np.min(enemy_healths))
     damage = bool(silver_features.get("damage_indicator", False))
     attacking = bool(silver_features.get("attacking", False))
 
+    if player_health <= DEATH_HEALTH_THRESHOLD:
+        return "lost"
+    if not enemies:
+        return "searching"
+    if min_enemy_health <= DEATH_HEALTH_THRESHOLD:
+        return "won"
     if damage:
         return "losing"
     if attacking:
@@ -150,28 +267,73 @@ def rule_based_label(silver_features: dict) -> str:
     return "stalemate"
 
 
+def apply_corrections(features: dict, scaffold: dict | None) -> dict:
+    """Apply labeler corrections (silver_override + context) to a feature dict.
+
+    The labeling tool can (a) override any Silver value directly and (b) record
+    *context* observations about the frame. Both are applied on top of the
+    feature dict here, so training (and rule recomputation) sees the corrected
+    values instead of the raw (possibly misread) Silver reads.
+    """
+    if not scaffold:
+        return features
+    corrected = dict(features)
+    override = scaffold.get("silver_override") or {}
+    corrected.update(override)
+    if "enemy0_hp" in override:
+        # Convenience override for the first enemy's health bar read; rewrite
+        # the enemies list so rules and feature mining consume the fix too.
+        enemies = corrected.get("enemies") or []
+        if enemies:
+            enemies[0] = dict(enemies[0], health=float(override["enemy0_hp"]))
+            corrected["enemies"] = enemies
+    context = scaffold.get("context") or {}
+    for context_key, feature_key in CONTEXT_FEATURE_MAP.items():
+        if context_key in context and context[context_key] is not None:
+            corrected[feature_key] = bool(context[context_key])
+    return corrected
+
+
 def _sample_features_for_label(rng: np.random.Generator, label: str, idx: int) -> dict:
     """Draw random SilverFeatures values that rule_based_label maps to *label*.
 
-    Since the label rules are initiative-based (damage/attack flags), the
-    synthesized flags are set so ``rule_based_label`` reproduces *label*:
-    losing = damage flash (priority), winning = attacking, stalemate = neither.
-    Health and enemy values stay randomized -- they are informative features
-    but do not drive the synthetic label.
+    Since the label rules are initiative-based, the synthesized flags are set
+    so ``rule_based_label`` reproduces *label*:
+
+    - winning = attacking (enemy present),  losing = damage flash,
+    - stalemate = neither flag,            searching = no enemies at all,
+    - won = every enemy at zero health,    lost = player health zero.
+
+    Health and enemy values stay randomized — they are informative features
+    but do not drive the synthetic label except through the death moments.
     """
     num_enemies = int(rng.integers(1, 3))
+    position = (float(rng.uniform(0.1, 0.9)), float(rng.uniform(0.1, 0.9)))
+    cooldown_fills = [float(rng.uniform(0.0, 1.0)) for _ in range(4)]
+
+    if label == "searching":
+        num_enemies = 0
+    elif label == "won":
+        num_enemies = 1  # the single enemy just died (kill moment)
 
     enemy_healths: list[float] = []
     for _ in range(num_enemies):
-        health = float(rng.uniform(0.1, 0.95))
+        if label == "won":
+            health = 0.0
+        else:
+            health = float(rng.uniform(0.1, 0.95))
         enemy_healths.append(health)
 
-    player_health = float(rng.uniform(0.05, 0.95))
+    player_health = 0.0 if label == "lost" else float(rng.uniform(0.05, 0.95))
 
+    # Flag matrix: damage has priority, attacking comes second, and the
+    # terminal states force their health readings instead of the flags.
     if label == "winning":
         attacking, defending, damage_indicator = True, False, False
     elif label == "losing":
         attacking, defending, damage_indicator = False, bool(rng.integers(0, 2)), True
+    elif label in ("searching", "won", "lost"):
+        attacking, defending, damage_indicator = False, False, False
     else:
         attacking, defending, damage_indicator = False, bool(rng.integers(0, 2)), False
 
@@ -191,12 +353,20 @@ def _sample_features_for_label(rng: np.random.Generator, label: str, idx: int) -
     return {
         "image_path": f"/synthetic/frame_{idx:04d}.png",
         "player_health": player_health,
-        "player_position": [0.5, 0.5],
+        "player_position": [position[0], position[1]],
         "enemies": enemies,
         "attacking": attacking,
         "defending": defending,
         "damage_indicator": damage_indicator,
         "num_enemies": num_enemies,
+        "ability_cooldowns": cooldown_fills,
+        "domain_ready": bool(all(f >= 0.95 for f in cooldown_fills)),
+        "player_ragdoll": bool(rng.integers(0, 2)) if label == "losing" else False,
+        "enemy_ragdoll": False,
+        "player_ultimate": False,
+        "enemy_ultimate": False,
+        "domain_active": False,
+        "domain_activating": False,
     }
 
 
@@ -220,7 +390,7 @@ def generate_synthetic_dataset(output_dir: str, num_samples: int = 100, seed: in
     rows: list[dict] = []
 
     for i in range(num_samples):
-        label = STATE_LABELS[int(rng.integers(0, 3))]
+        label = STATE_LABELS[int(rng.integers(0, len(STATE_LABELS)))]
         features = _sample_features_for_label(rng, label, i)
         if rule_based_label(features) != label:
             raise RuntimeError(f"Internal error: sampled features for {label!r} failed the rule check")
@@ -249,26 +419,42 @@ def load_labeled_dataset(data_root: str) -> tuple[np.ndarray, np.ndarray, list[s
         data_root/
             silver/*.json    # SilverFeatures dicts (optionally with "label")
             labels.csv       # stem,label — takes precedence over embedded labels
+            labeling/*.json  # optional scaffolds: exclude/override/context
 
-    Returns ``(X, y, stems)`` where ``X`` is the (n, 8) feature matrix and
-    ``y`` holds integer labels 0..2 (indices into STATE_LABELS).
+    Returns ``(X, y, stems)`` where ``X`` is the (n, len(FEATURE_NAMES))
+    feature matrix and ``y`` holds integer labels 0..5 (indices into
+    STATE_LABELS).
 
-    When *some* labels exist (in ``labels.csv`` or embedded), sample without a
+    When *some* labels exist (in ``labels.csv`` or embedded), samples without a
     label are skipped quietly — this is how real partial/skipped datasets train
     on just the reviewed subset. It raises only when *no* labels exist at all.
+
+    Scaffolds (from the labeling tool) are honoured when present: ``exclude``
+    and ``skip``-marked frames are dropped from training, and labeler
+    corrections (``silver_override`` + ``context``) are applied to the feature
+    vector, so the model trains on the reviewed truth rather than misreads.
     """
     root = Path(data_root)
     if not root.exists():
         raise FileNotFoundError(f"Dataset root not found: {root}")
 
     silver_dir = root / "silver"
+    labeling_dir = root / "labeling"
     csv_labels: dict[str, str] = {}
     csv_path = root / "labels.csv"
     if csv_path.exists():
         with csv_path.open() as f:
             csv_labels = {row["stem"]: row["label"] for row in csv.DictReader(f)}
 
+    scaffolds: dict[str, dict] = {}
+    if labeling_dir.exists():
+        for path in sorted(labeling_dir.glob("*_labeling.json")):
+            stem = path.stem.removesuffix("_labeling")
+            with open(path) as f:
+                scaffolds[stem] = json.load(f)
+
     samples: list[dict] = []
+    dropped_excluded = 0
     missing: list[str] = []
     for json_path in sorted(silver_dir.glob("*.json")):
         with open(json_path) as f:
@@ -278,13 +464,18 @@ def load_labeled_dataset(data_root: str) -> tuple[np.ndarray, np.ndarray, list[s
 
         stem = json_path.stem.removesuffix("_silver")
 
+        scaffold = scaffolds.get(stem)
+        if scaffold and (scaffold.get("exclude") or scaffold.get("skip")):
+            dropped_excluded += 1
+            continue
+
         label = csv_labels.get(stem, data.get("label"))
         if label is None:
             missing.append(stem)
             continue
         if label not in STATE_LABELS:
             raise ValueError(f"Invalid label {label!r} for sample {stem!r} (expected one of {STATE_LABELS})")
-        samples.append((data, stem, label))
+        samples.append((apply_corrections(data, scaffold), stem, label))
 
     if not samples:
         if missing:
@@ -298,6 +489,8 @@ def load_labeled_dataset(data_root: str) -> tuple[np.ndarray, np.ndarray, list[s
     X = np.stack([features_to_vector(data) for data, _, _ in samples]).astype(np.float32)
     y = np.array([STATE_LABELS.index(label) for _, _, label in samples], dtype=np.int64)
     stems = [stem for _, stem, _ in samples]
+    if dropped_excluded:
+        print(f"load_labeled_dataset: dropped {dropped_excluded} excluded/skipped scaffolded frames")
     return X, y, stems
 
 
@@ -447,20 +640,21 @@ def _plot_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, save_path: st
     from matplotlib import pyplot as plt
 
     cm = confusion_matrix(y_true, y_pred, labels=list(range(len(STATE_LABELS))))
+    n = len(STATE_LABELS)
     fig, ax = plt.subplots(figsize=(7, 6))
     im = ax.imshow(cm, cmap="Blues")
     ax.figure.colorbar(im, ax=ax)
     ax.set(
-        xticks=range(3),
-        yticks=range(3),
+        xticks=range(n),
+        yticks=range(n),
         xticklabels=STATE_LABELS,
         yticklabels=STATE_LABELS,
         xlabel="Predicted label",
         ylabel="True label",
         title=title,
     )
-    for row in range(3):
-        for col in range(3):
+    for row in range(n):
+        for col in range(n):
             bright = cm[row, col] > cm.max() / 2
             ax.text(col, row, cm[row, col], ha="center", va="center", color="white" if bright else "black")
     fig.tight_layout()

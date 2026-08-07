@@ -21,7 +21,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.pipeline.gold import H, W, generate_synthetic_dataset, infer_new_vod, register_best_model
+from src.pipeline.gold import (
+    FEATURE_NAMES,
+    H,
+    W,
+    generate_synthetic_dataset,
+    infer_new_vod,
+    register_best_model,
+)
 
 REGISTERED_NAME = "state_reader"
 
@@ -75,7 +82,7 @@ def logged_model_path(tracking_uri) -> str:
     from sklearn.preprocessing import StandardScaler
 
     rng = np.random.default_rng(0)
-    X = rng.uniform(0.0, 1.0, (40, 8))
+    X = rng.uniform(0.0, 1.0, (40, len(FEATURE_NAMES)))
     y = np.where(X[:, 5] > X[:, 4], 1, 0)
     model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
     model.fit(X, y)

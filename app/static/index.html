@@ -9,7 +9,8 @@
     --bg: #0f1115; --panel: #171a21; --border: #2a2f3a;
     --text: #e6e8ee; --muted: #9aa3b2;
     --win: #2ecc71; --lose: #e74c3c; --stalemate: #f1c40f;
-    --accent: #4f8cff; --skip: #7f8c9b;
+    --searching: #3498db; --won: #27ae60; --lost: #c0392b;
+    --accent: #4f8cff; --skip: #7f8c9b; --exclude: #9b59b6;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
@@ -26,7 +27,7 @@
   #toolbar button, #jumpBtn { background: #222732; color: var(--text); border: 1px solid var(--border);
                               border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
   #toolbar button:hover, #jumpBtn:hover { border-color: var(--accent); }
-  #filter { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  #filter { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
   #filter button { flex: 1; background: transparent; color: var(--muted); border: 1px solid transparent;
                    border-radius: 6px; padding: 5px 4px; cursor: pointer; font-size: 12px; }
   #filter button.active { color: var(--text); border-color: var(--accent); background: #1d2733; }
@@ -37,28 +38,49 @@
   .frow.active { border-color: var(--accent); background: #1d2733; color: var(--text); }
   .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #333a46; }
   .winning .dot { background: var(--win); } .losing .dot { background: var(--lose); }
-  .stalemate .dot { background: var(--stalemate); } .skipped .dot { background: var(--skip); }
+  .stalemate .dot { background: var(--stalemate); } .searching .dot { background: var(--searching); }
+  .won .dot { background: var(--won); } .lost .dot { background: var(--lost); }
+  .skipped .dot { background: var(--skip); } .excluded .dot { background: var(--exclude); }
   .frow .idx { margin-left: auto; color: #6b7484; font-variant-numeric: tabular-nums; max-width: 60%;
                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #main { display: grid; grid-template-rows: 1fr auto; min-width: 0; }
   #imageBox { overflow: auto; background: #0a0c10; display: grid; place-items: center; }
   #imageBox img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
   #empty { color: #566; font-size: 15px; }
-  #rightPanel { border-top: 1px solid var(--border); background: var(--panel); padding: 12px 16px; }
+  #rightPanel { border-top: 1px solid var(--border); background: var(--panel); padding: 12px 16px;
+                max-height: 46vh; overflow-y: auto; }
   #stateChip { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
-  #actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  #actions button { border: none; border-radius: 8px; padding: 10px 18px; font-size: 15px; font-weight: 600;
+  #actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #actions button { border: none; border-radius: 8px; padding: 10px 14px; font-size: 14px; font-weight: 600;
                     cursor: pointer; color: #101014; }
-  #btnWin { background: var(--win); } #btnLose { background: var(--lose); } #btnStale { background: var(--stalemate); }
+  #btnWin { background: var(--win); } #btnLose { background: var(--lose); }
+  #btnStale { background: var(--stalemate); } #btnSearch { background: var(--searching); }
+  #btnWon { background: var(--won); } #btnLost { background: var(--lost); }
   #btnSkip { background: #48505e; color: var(--text); }
+  #btnExclude { background: var(--exclude); color: var(--text); }
   #actions button.active { outline: 3px solid #fff; }
-  #notes { flex: 1; min-width: 180px; background: #10131a; color: var(--text);
-           border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
-  #featBox { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px;
-             margin-top: 10px; font-size: 13px; }
+  .panelLabel { font-size: 11px; text-transform: uppercase; color: var(--muted);
+                margin: 12px 0 6px; letter-spacing: .06em; }
+  .flexRow { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  #featBox { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px 16px;
+             margin-top: 6px; font-size: 12px; }
   .feat { color: var(--muted); } .feat b { color: var(--text); font-weight: 500; }
+  #contextBox { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; }
+  #contextBox label { display: flex; gap: 6px; align-items: center; cursor: pointer;
+                      background: #1d212b; padding: 5px 9px; border-radius: 6px; }
+  #contextBox input { accent-color: var(--accent); }
+  .ctxOn { box-shadow: 0 0 0 2px var(--win); }
+  .ctxOff { box-shadow: 0 0 0 2px var(--lose); }
+  .ctxUnset { box-shadow: 0 0 0 1px var(--border); }
+  #overrideBox { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; }
+  #overrideBox label { display: flex; gap: 6px; align-items: center; background: #1d212b;
+                     padding: 5px 9px; border-radius: 6px; }
+  #overrideBox input[type="checkbox"] { accent-color: var(--accent); }
+  #overrideBox input[type="number"], #overrideBox input[type="text"] { width: 64px; background: #10131a;
+    color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 3px 6px; }
   #legend { margin-top: 8px; font-size: 12px; color: var(--muted); }
   #legend b.ok { color: var(--win); } #legend b.bad { color: var(--lose); } #legend b.mid { color: var(--stalemate); }
+  #legend b.srch { color: var(--searching); }
   kbd { background: #222b33; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--muted); }
 </style>
 </head>
@@ -78,6 +100,7 @@
       <button data-f="todo" class="active">To do</button>
       <button data-f="labeled">Labeled</button>
       <button data-f="skipped">Skipped</button>
+      <button data-f="excluded">Excluded</button>
       <button data-f="all">All</button>
     </div>
     <div id="frameList"></div>
@@ -91,25 +114,45 @@
         <button id="btnWin" data-state="winning">1 · Winning</button>
         <button id="btnLose" data-state="losing">2 · Losing</button>
         <button id="btnStale" data-state="stalemate">3 · Stalemate</button>
+        <button id="btnSearch" data-state="searching">4 · Searching</button>
+        <button id="btnWon" data-state="won">5 · Won</button>
+        <button id="btnLost" data-state="lost">6 · Lost</button>
         <button id="btnSkip" data-state="skip" title="Out-of-distribution noise — skip">Skip</button>
-        <input id="notes" type="text" placeholder="notes (optional)" />
+        <button id="btnExclude" data-state="exclude" title="Remove from dataset">Exclude</button>
       </div>
+
       <div id="featBox">
         <div class="feat"><b>Rule label</b><br/><span id="fRule">–</span></div>
         <div class="feat"><b>Player health</b><br/><span id="fHealth">–</span></div>
         <div class="feat"><b>Enemies (health)</b><br/><span id="fEnemies">–</span></div>
         <div class="feat"><b>Attack / Defense</b><br/><span id="fFlags">–</span></div>
         <div class="feat"><b>Damage flash</b><br/><span id="fDmg">–</span></div>
+        <div class="feat"><b>Cooldowns</b><br/><span id="fCooldowns">–</span></div>
+        <div class="feat"><b>Ragdoll / Ult / Domain</b><br/><span id="fSprites">–</span></div>
         <div class="feat"><b>OCR conf</b><br/><span id="fConf">–</span></div>
         <div class="feat"><b>Round @ time</b><br/><span id="fRound">–</span></div>
         <div class="feat"><b>Frame</b><br/><span id="fFrame">–</span></div>
       </div>
+
+      <div class="flexRow">
+        <div style="flex:1">
+          <div class="panelLabel">Frame context (feeds the model)</div>
+          <div id="contextBox"></div>
+        </div>
+        <div style="flex:1">
+          <div class="panelLabel">Fix Silver reads (overrides)</div>
+          <div id="overrideBox"></div>
+        </div>
+      </div>
+
       <div id="legend"><b class="ok">winning</b> = you&rsquo;re striking &middot;
         <b class="bad">losing</b> = you&rsquo;re taking damage &middot;
-        <b class="mid">stalemate</b> = nothing happening (defending counts here)</div>
+        <b class="mid">stalemate</b> = nothing happening &middot;
+        <b class="search">searching</b> = no opponent visible &middot;
+        <b class="ok">won</b> = enemy died &middot; <b class="bad">lost</b> = you died</div>
       <div style="margin-top:6px;color:var(--muted);font-size:11px">
-        <kbd>1</kbd>win · <kbd>2</kbd>lose · <kbd>3</kbd>stale · <kbd>s</kbd>skip · <kbd>u</kbd>undo ·
-        <kbd>n</kbd>/<kbd>p</kbd>nav · <kbd>e</kbd>export
+        <kbd>1</kbd>-<kbd>6</kbd> label &middot; <kbd>s</kbd>skip &middot; <kbd>x</kbd>exclude &middot;
+        <kbd>u</kbd>undo &middot; <kbd>n</kbd>/<kbd>p</kbd>nav &middot; <kbd>e</kbd>export
       </div>
     </section>
   </main>
@@ -118,11 +161,14 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const FILTERS = { todo: "unlabeled", labeled: "labeled", skipped: "skipped", all: "all" };
+const FILTERS = { todo: "unlabeled", labeled: "labeled", skipped: "skipped", excluded: "excluded", all: "all" };
+const STATE_LABELS = ["winning", "losing", "stalemate", "searching", "won", "lost"];
+const STATE_KEY = { "1": "winning", "2": "losing", "3": "stalemate", "4": "searching", "5": "won", "6": "lost" };
 
 let stems = [];            // stems in the current filtered view
 let current = null;        // selected stem
-let states = {};           // stem -> {label, skip, rule_label}
+let apiFrame = null;       // raw /api/frame payload (for context/override edits)
+let states = {};           // stem -> {label, skip, exclude, rule_label}
 let total = 0;
 const PAGE = 120;
 
@@ -150,6 +196,7 @@ async function loadStates() {
 function statusOf(stem) {
   const s = states[stem];
   if (!s) return "none";
+  if (s.exclude) return "excluded";
   if (s.skip) return "skip";
   return s.label || "none";
 }
@@ -162,7 +209,6 @@ function loadFrames(filter, reset = true) {
       stems = stems.concat(d.stems);
       renderFrameList();
       if (d.stems.length === PAGE) {
-        // keep paging in the background until exhausted
         loadFrames(filter, false).catch(() => {});
       }
     });
@@ -197,10 +243,10 @@ function stateMeta(stem) {
 function repaintRow(stem) {
   const row = document.querySelector(`.frow[data-stem="${CSS.escape(stem)}"]`);
   if (!row) return;
-  row.classList.toggle("winning", states[stem]?.label === "winning");
-  row.classList.toggle("losing", states[stem]?.label === "losing");
-  row.classList.toggle("stalemate", states[stem]?.label === "stalemate");
-  row.classList.toggle("skip", !!states[stem]?.skip);
+  for (const cls of ["winning", "losing", "stalemate", "searching", "won", "lost"])
+    row.classList.toggle(cls, states[stem]?.label === cls);
+  row.classList.toggle("skipped", !!states[stem]?.skip);
+  row.classList.toggle("excluded", !!states[stem]?.exclude);
   row.querySelector(".idx").textContent = stateMeta(stem);
 }
 
@@ -211,6 +257,7 @@ function markCurrent() {
 async function openFrame(stem) {
   current = stem;
   const d = await json(`/api/frame/${encodeURIComponent(stem)}`);
+  apiFrame = d;
   showFrame(d);
   markCurrent();
 }
@@ -225,20 +272,115 @@ function showFrame(d) {
   $("fEnemies").textContent = f.num_enemies + (enemies.length ? " [" + enemies.join(", ") + "%]" : "");
   $("fFlags").textContent = (f.attacking ? "attacking" : "—") + " / " + (f.defending ? "defending" : "—");
   $("fDmg").textContent = f.damage_indicator ? "yes" : "no";
+  const cds = (f.ability_cooldowns || []).map((c) => Math.round(c * 100) + "%");
+  $("fCooldowns").textContent = cds.length ? cds.join(" ") : (f.domain_ready ? "domain ready" : "–");
+  const sprites = [
+    f.player_ragdoll ? "p.ragdoll" : "", f.enemy_ragdoll ? "e.ragdoll" : "",
+    f.player_ultimate ? "p.ult" : "", f.enemy_ultimate ? "e.ult" : "",
+    f.domain_active ? "domain" : "", f.domain_activating ? "domain!" : "",
+  ].filter(Boolean).join(" ");
+  $("fSprites").textContent = sprites || "–";
   $("fConf").textContent = f.ocr_confidence.toFixed(2);
   $("fRound").textContent = "r" + f.round_index + " @ " + f.timestamp_sec.toFixed(1) + "s";
   $("fFrame").textContent = d.image_rel || "–";
-  $("notes").value = f.notes || "";
-  paintActions(f);
+  paintActions();
+  paintContext(f);
+  paintOverrides(f);
 }
+
+const CTX_LABELS = {
+  player_moving: "player moving", enemy_visible: "enemy visible",
+  player_ragdolled: "player ragdolled", enemy_ragdolled: "enemy ragdolled",
+  player_ultimate_active: "player ult", enemy_ultimate_active: "enemy ult",
+  domain_active: "domain active", round_start: "round start", round_end: "round end",
+};
+
+function paintContext(f) {
+  const box = $("contextBox");
+  box.innerHTML = "";
+  for (const key of Object.keys(CTX_LABELS)) {
+    const cur = f.context && key in f.context ? f.context[key] : null;
+    const label = document.createElement("label");
+    label.className = cur === true ? "ctxOn" : cur === false ? "ctxOff" : "ctxUnset";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = cur === true;
+    cb.indeterminate = cur === null || cur === undefined;
+    cb.addEventListener("change", () => {
+      savePatch({ context: { [key]: cb.checked } });
+      paintContextLabel(label, key);
+    });
+    const text = document.createElement("span");
+    text.textContent = CTX_LABELS[key];
+    label.append(cb, text);
+    box.appendChild(label);
+  }
+}
+
+function paintContextLabel(label) {
+  // after savePatch the current feature dict isn't refreshed; approximate
+  // from the checkbox in DOM.
+  const cb = label.querySelector("input");
+  label.className = cb.checked ? "ctxOn" : "ctxOff";
+}
+
+const OVERRIDE_FIELDS = [
+  ["attacking", "attacking", "bool"], ["defending", "defending", "bool"],
+  ["damage_indicator", "damage", "bool"], ["player_ragdoll", "player ragdoll", "bool"],
+  ["enemy_ragdoll", "enemy ragdoll", "bool"], ["player_ultimate", "player ult", "bool"],
+  ["enemy_ultimate", "enemy ult", "bool"], ["domain_active", "domain", "bool"],
+  ["player_health", "player hp", "range"], ["enemy0_hp", "enemy hp", "range"],
+];
+
+function paintOverrides(f) {
+  const box = $("overrideBox");
+  box.innerHTML = "";
+  const ov = f.silver_override || {};
+  for (const [key, label, kind] of OVERRIDE_FIELDS) {
+    const wrap = document.createElement("label");
+    const text = document.createElement("span");
+    text.textContent = label;
+    wrap.appendChild(text);
+    if (kind === "bool") {
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      const cur = key in ov ? ov[key] : f[key];
+      cb.checked = !!cur;
+      cb.addEventListener("change", () => {
+        const patch = { silver_override: {} };
+        patch.silver_override[key] = cb.checked;
+        savePatch(patch);
+      });
+      wrap.appendChild(cb);
+    } else if (key === "player_health") {
+      const num = document.createElement("input");
+      num.type = "number"; num.min = 0; num.max = 1; num.step = 0.05;
+      num.value = (key in ov ? ov[key] : f.player_health).toFixed(2);
+      num.addEventListener("change", () => savePatch({ silver_override: { player_health: clamp(parseFloat(num.value) || 0) } }));
+      wrap.appendChild(num);
+    } else if (key === "enemy0_hp") {
+      const first = (f.enemies || [])[0];
+      const num = document.createElement("input");
+      num.type = "number"; num.min = 0; num.max = 1; num.step = 0.05;
+      num.value = (ov.enemy0_hp != null ? ov.enemy0_hp : (first ? first.health : 0)).toFixed(2);
+      num.addEventListener("change", () => savePatch({ silver_override: { enemy0_hp: clamp(parseFloat(num.value) || 0) } }));
+      wrap.appendChild(num);
+    }
+    box.appendChild(wrap);
+  }
+}
+
+function clamp(v) { return Math.max(0, Math.min(1, v)); }
 
 function paintActions() {
   const f = states[current] || {};
-  const sel = f.skip ? "skip" : f.label || "";
-  ["btnWin", "btnLose", "btnStale", "btnSkip"].forEach((id) => {
-    const key = { btnWin: "winning", btnLose: "losing", btnStale: "stalemate", btnSkip: "skip" }[id];
+  const sel = f.exclude ? "exclude" : f.skip ? "skip" : f.label || "";
+  const map = { btnWin: "winning", btnLose: "losing", btnStale: "stalemate",
+                btnSearch: "searching", btnWon: "won", btnLost: "lost" };
+  for (const [id, key] of Object.entries(map))
     document.getElementById(id).classList.toggle("active", sel === key);
-  });
+  $("btnSkip").classList.toggle("active", sel === "skip");
+  $("btnExclude").classList.toggle("active", sel === "exclude");
 }
 
 async function savePatch(patch) {
@@ -248,10 +390,13 @@ async function savePatch(patch) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
-  states[current] = { label: d.payload.label, skip: d.payload.skip, rule: d.payload.rule_label };
+  states[current] = { label: d.payload.label, skip: d.payload.skip,
+                      exclude: d.payload.exclude, rule_label: d.payload.rule_label };
   paintActions();
   repaintRow(current);
   loadSummary().catch(() => {});
+  if (apiFrame && (patch.context || patch.silver_override))
+    apiFrame.features = d.payload;  // keep the editor in sync with saved answers
 }
 
 function nextFrame(step = 1) {
@@ -272,7 +417,8 @@ async function exportLabels() {
   loadSummary().catch(() => {});
 }
 
-document.getElementById("undoBtn").addEventListener("click", () => savePatch({ label: null, skip: false }));
+document.getElementById("undoBtn").addEventListener("click", () =>
+  savePatch({ label: null, skip: false, exclude: false }));
 document.getElementById("exportBtn").addEventListener("click", exportLabels);
 document.getElementById("jumpBtn").addEventListener("click", () => {
   const stem = prompt("Frame stem (e.g. MedalTVRoblox20260703214908512_frame_001120):");
@@ -283,22 +429,17 @@ document.addEventListener("click", (e) => {
   const b = e.target.closest("#actions button");
   if (!b) return;
   if (b.id === "btnSkip") savePatch({ skip: true });
+  else if (b.id === "btnExclude") savePatch({ exclude: true });
   else labelAndAdvance(b.dataset.state);
 });
 
-const notesEl = document.getElementById("notes");
-notesEl.addEventListener("change", () => savePatch({ notes: notesEl.value }));
-
 document.addEventListener("keydown", (e) => {
-  if (e.target === notesEl) {
-    if (e.key === "Escape") { notesEl.value = ""; savePatch({ notes: "" }); }
-    return;
-  }
-  if (e.key === "1") labelAndAdvance("winning");
-  if (e.key === "2") labelAndAdvance("losing");
-  if (e.key === "3") labelAndAdvance("stalemate");
+  if (e.target.closest && e.target.closest("#contextBox, #overrideBox")) return; // typing in inputs
+  const key = STATE_KEY[e.key];
+  if (key) { e.preventDefault(); labelAndAdvance(key); return; }
   if (e.key === "s") savePatch({ skip: true });
-  if (e.key === "u") savePatch({ label: null, skip: false });
+  if (e.key === "x") savePatch({ exclude: true });
+  if (e.key === "u") savePatch({ label: null, skip: false, exclude: false });
   if (e.key === "n") nextFrame(1);
   if (e.key === "p") nextFrame(-1);
   if (e.key === "e") exportLabels();
@@ -312,11 +453,10 @@ document.getElementById("filter").addEventListener("click", (e) => {
   loadFrames(b.dataset.f);
 });
 
-// auto-open the first to-do stem when the corpus is empty-labeled
-async function openFirstUnlabeled() {
-  const d = await json("/api/frames?status=unlabeled&offset=0&limit=1");
+const openFirstUnlabeled = async () => {
+  const d = await json("/api/frames?status=todo&offset=0&limit=1");
   if (d.stems.length) openFrame(d.stems[0]);
-}
+};
 
 (async function init() {
   await loadStates();

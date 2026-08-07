@@ -15,6 +15,7 @@ from src.pipeline.gold import (
     FEATURE_NAMES,
     MODEL_ZOO,
     STATE_LABELS,
+    apply_corrections,
     classify_states,
     features_to_vector,
     generate_synthetic_dataset,
@@ -129,9 +130,12 @@ class TestFeaturesToVector:
         assert vec.dtype == np.float32
 
     def test_feature_names_constant(self):
-        assert len(FEATURE_NAMES) == 8
+        assert len(FEATURE_NAMES) == 29
         assert FEATURE_NAMES[0] == "player_health"
         assert "health_ratio" in FEATURE_NAMES
+        # NVIDIA-style crosses are present and after the base features.
+        assert "player_health_x_health_ratio" in FEATURE_NAMES
+        assert FEATURE_NAMES.index("player_health") < FEATURE_NAMES.index("player_health_x_health_ratio")
 
     def test_health_ratio_computation(self, winning_features):
         vec = features_to_vector(winning_features)
@@ -167,14 +171,56 @@ class TestFeaturesToVector:
             num_enemies=winning_features["num_enemies"],
         )
         vec = features_to_vector(sf.__dict__)
-        assert vec.shape == (8,)
+        assert vec.shape == (len(FEATURE_NAMES),)
 
     def test_real_silver_json_works(self, real_silver_json):
         if real_silver_json is None:
             pytest.skip("No real silver JSON found in data/silver/")
         vec = features_to_vector(real_silver_json)
-        assert vec.shape == (8,)
+        assert vec.shape == (len(FEATURE_NAMES),)
         assert np.isfinite(vec).all()
+
+    def test_cross_features_are_multiplicative(self, winning_features):
+        """NVIDIA-style crosses multiply their base parts (e.g. joy:
+        player_health * health_ratio), so the model sees combinations."""
+        vec = features_to_vector(winning_features)
+        health = vec[FEATURE_NAMES.index("player_health")]
+        ratio = vec[FEATURE_NAMES.index("health_ratio")]
+        pos_x = vec[FEATURE_NAMES.index("player_position_x")]
+        attacking = vec[FEATURE_NAMES.index("attacking")]
+        n_enemies = vec[FEATURE_NAMES.index("num_enemies")]
+        assert vec[FEATURE_NAMES.index("player_health_x_health_ratio")] == pytest.approx(health * ratio)
+        assert vec[FEATURE_NAMES.index("player_health_x_player_position_x")] == pytest.approx(health * pos_x)
+        assert vec[FEATURE_NAMES.index("attacking_x_health_ratio")] == pytest.approx(attacking * ratio)
+        assert vec[FEATURE_NAMES.index("attacking_x_num_enemies")] == pytest.approx(attacking * n_enemies)
+
+    def test_cooldowns_default_from_domain_ready(self):
+        """Old 8-field dicts without per-slot cooldowns fall back to the
+        domain_ready boolean they carried."""
+        sf = {
+            "player_health": 0.5,
+            "player_position": [0.5, 0.5],
+            "enemies": [{"health": 0.5}],
+            "attacking": False,
+            "defending": False,
+            "damage_indicator": False,
+            "num_enemies": 1,
+            "domain_ready": True,
+        }
+        vec = features_to_vector(sf)
+        assert vec[FEATURE_NAMES.index("cooldown_0")] == 1.0
+        assert vec[FEATURE_NAMES.index("cooldown_3")] == 1.0
+        sf["domain_ready"] = False
+        vec = features_to_vector(sf)
+        assert vec[FEATURE_NAMES.index("cooldown_0")] == 0.0
+
+    def test_cooldowns_default_false_without_domain_ready(self):
+        """Minimal hand-built dicts still produce a finite vector."""
+        sf = {"player_health": 0.5, "player_position": [0.5, 0.5], "enemies": []}
+        vec = features_to_vector(sf)
+        assert vec.shape == (len(FEATURE_NAMES),)
+        assert np.isfinite(vec).all()
+        assert vec[FEATURE_NAMES.index("cooldown_0")] == 0.0
 
 
 # ── Rule-based labeling ──────────────────────────────────────────────────────
@@ -195,11 +241,11 @@ class TestRuleBasedLabel:
             "image_path": "/p.png",
             "player_health": 0.4,
             "player_position": [0.5, 0.5],
-            "enemies": [],
+            "enemies": [{"health": 0.8}],
             "attacking": True,
             "defending": False,
             "damage_indicator": True,
-            "num_enemies": 0,
+            "num_enemies": 1,
         }
         # Player is attacking AND being hit -> being hit wins the overlap.
         assert rule_based_label(sf) == "losing"
@@ -208,11 +254,11 @@ class TestRuleBasedLabel:
         sf = {
             "player_health": 0.5,
             "player_position": [0.5, 0.5],
-            "enemies": [],
+            "enemies": [{"health": 0.5}],
             "attacking": False,
             "defending": True,
             "damage_indicator": False,
-            "num_enemies": 0,
+            "num_enemies": 1,
         }
         # Guards don't decide the label: defensive posture is neutral.
         assert rule_based_label(sf) == "stalemate"
@@ -257,6 +303,96 @@ class TestRuleBasedLabel:
                 "num_enemies": 1,
             }
             assert rule_based_label(sf) in STATE_LABELS
+
+    def test_searching_when_no_enemies(self):
+        sf = {
+            "player_health": 0.7,
+            "player_position": [0.5, 0.5],
+            "enemies": [],
+            "attacking": False,
+            "defending": False,
+            "damage_indicator": False,
+            "num_enemies": 0,
+        }
+        assert rule_based_label(sf) == "searching"
+
+    def test_won_on_enemy_death(self):
+        sf = {
+            "player_health": 0.8,
+            "player_position": [0.5, 0.5],
+            "enemies": [{"health": 0.0}, {"health": 0.4}],
+            "attacking": False,
+            "defending": False,
+            "damage_indicator": False,
+            "num_enemies": 1,
+        }
+        assert rule_based_label(sf) == "won"
+
+    def test_lost_on_player_death(self):
+        sf = {
+            "player_health": 0.0,
+            "player_position": [0.5, 0.5],
+            "enemies": [{"health": 0.9}],
+            "attacking": False,
+            "defending": False,
+            "damage_indicator": False,
+            "num_enemies": 1,
+        }
+        assert rule_based_label(sf) == "lost"
+
+    def test_player_death_beats_searching_and_won(self):
+        """A dead player is 'lost' even if no enemy is on screen or the rule
+        would call the trade a 'won' (both zeroed, player frames first)."""
+        sf = {
+            "player_health": 0.0,
+            "player_position": [0.5, 0.5],
+            "enemies": [],
+            "attacking": False,
+            "defending": False,
+            "damage_indicator": False,
+            "num_enemies": 0,
+        }
+        assert rule_based_label(sf) == "lost"
+        sf["enemies"] = [{"health": 0.0}]
+        assert rule_based_label(sf) == "lost"
+
+    def test_death_moment_frames_only(self):
+        """Health exactly zero is the death moment (won/lost); a sliver of HP
+        on either side stays a normal fight state."""
+        sf = {
+            "player_health": 0.0,
+            "player_position": [0.5, 0.5],
+            "enemies": [{"health": 0.1}],
+            "attacking": False,
+            "defending": False,
+            "damage_indicator": True,
+            "num_enemies": 1,
+        }
+        assert rule_based_label(sf) == "lost"
+        sf["player_health"] = 0.05  # alive again -> ordinary 'losing' frame
+        assert rule_based_label(sf) == "losing"
+
+    def test_enemy0_hp_override_corrects_rule_and_vector(self):
+        """The labeler's ``enemy0_hp`` silver_override rewrites the first
+        enemy's health, so a fixed misread moves the rule label (e.g. the
+        visible enemy was actually dead) and the mined feature vector."""
+        sf = {
+            "player_health": 0.8,
+            "player_position": [0.5, 0.5],
+            "enemies": [{"health": 0.9}],
+            "attacking": False,
+            "defending": False,
+            "damage_indicator": False,
+            "num_enemies": 1,
+        }
+        scaffold = {"silver_override": {"enemy0_hp": 0.0}}
+        corrected = apply_corrections(sf, scaffold)
+        assert corrected["enemies"][0]["health"] == 0.0
+        assert rule_based_label(corrected) == "won"
+        vec = features_to_vector(corrected)
+        assert vec[FEATURE_NAMES.index("min_enemy_health")] == 0.0
+        assert vec[FEATURE_NAMES.index("mean_enemy_health")] == 0.0
+        assert not np.isnan(vec).any()
 
 
 # ── Synthetic labeled dataset ────────────────────────────────────────────────
@@ -314,7 +450,7 @@ class TestLoadLabeledDataset:
         assert X.shape == (30, len(FEATURE_NAMES))
         assert y.shape == (30,)
         assert len(stems) == 30
-        assert set(y.tolist()) <= {0, 1, 2}
+        assert set(y.tolist()) <= set(range(len(STATE_LABELS)))
 
     def test_csv_overrides_embedded_label(self, labeled_dataset):
         ds = Path(labeled_dataset)
@@ -337,7 +473,7 @@ class TestLoadLabeledDataset:
         (ds / "labels.csv").unlink()
         X, y, _ = load_labeled_dataset(labeled_dataset)
         assert X.shape[0] == 30
-        assert set(y.tolist()) <= {0, 1, 2}
+        assert set(y.tolist()) <= set(range(len(STATE_LABELS)))
 
     def test_raises_on_unlabeled_sample(self, tmp_path):
         ds = tmp_path / "unlabeled"

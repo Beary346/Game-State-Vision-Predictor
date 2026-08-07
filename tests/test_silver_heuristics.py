@@ -133,7 +133,7 @@ class TestAggregateRounds:
         entries = simulate_match(num_frames=40, seed=3)
         states = [classify_frame(e["frame"]) for e in entries]
         tagged, summaries = aggregate_rounds(states)
-        assert set(s.round_index for s in tagged) == {0}
+        assert {s.round_index for s in tagged} == {0}
         assert [r.num_frames for r in summaries] == [40]
 
     def test_health_reset_starts_a_new_round(self):

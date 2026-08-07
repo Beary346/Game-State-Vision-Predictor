@@ -37,6 +37,17 @@ ABILITY_SLOTS = 4
 DAMAGE_FLASH_REGION = (W // 2 - 140, 120, 280, 44)
 PLAYER_SPRITE_RADIUS = 34
 UNITS_MIN_Y = 170
+SPRITE_SEARCH_RADIUS = 8  # sprite region half-extent, in multiples of PLAYER_SPRITE_RADIUS
+
+# Ragdoll/ultimate/domain heuristics are best-effort (no dedicated HUD widget):
+# thresholds live here so the labeler + docs can refer to them exactly.
+RAGDOLL_ASPECT_RATIO = 1.35      # blob wider than tall -> fallen character
+RAGDOLL_MIN_SOLIDITY = 0.35      # minimum fill of a blob's own bbox to trust its shape
+ULTIMATE_AURA_SAT_MIN = 150      # aura pixels are extremely saturated
+ULTIMATE_AURA_VAL_MIN = 160      # and bright (distinct from the domain tint)
+ULTIMATE_AURA_COVERAGE = 0.005   # aura takes >0.5% of the sprite crop
+DOMAIN_TINT_MIN = 0.45           # domain overlay covers ~half the frame
+DOMAIN_TINT_ACTIVATING = 0.25    # dome sweeping in covers at least a quarter
 
 # RGB palette for the synthetic HUD. Hue values are chosen so the HSV ranges
 # used by the frame detectors land on the expected colour families.
@@ -76,6 +87,17 @@ class SilverFeatures:
     ocr_confidence: float = 1.0
     round_index: int = 0
     warnings: list = field(default_factory=list)
+    # Extended feature set (all defaulted so old JSONs deserialize).
+    health_ratio: float = 1.0
+    ability_cooldowns: list[float] = field(default_factory=list)
+    num_abilities_ready: int = 0
+    player_ragdoll: bool = False
+    enemy_ragdoll: bool = False
+    player_ultimate: bool = False
+    enemy_ultimate: bool = False
+    domain_active: bool = False
+    domain_activating: bool = False
+    feature_confidences: dict = field(default_factory=dict)
 
     def to_annotation(self) -> dict:
         """Return only the original 8-field annotation subset (CNN compat)."""
@@ -273,6 +295,168 @@ def read_ability_indicators(
     return ready, float(np.mean(confs) if confs else 0.0)
 
 
+def read_ability_cooldowns(
+    frame: np.ndarray, bbox: tuple[int, int, int, int], n_slots: int = ABILITY_SLOTS
+) -> tuple[list[float], float]:
+    """Read per-slot cooldown *fills* (continuous 0..1) over the ability row.
+
+    Unlike ``read_ability_indicators`` (boolean ready flags), this returns the
+    filled fraction of every slot so Gold can see partial cooldowns, e.g.
+    ``[0.87, 0.0, 0.5, 1.0]``. Confidence is the mean per-slot ambiguity.
+    """
+    crop = crop_region(frame, bbox)
+    if crop.size == 0:
+        return [0.0] * n_slots, 0.0
+    slot_width = max(crop.shape[1] // n_slots, 1)
+    fills: list[float] = []
+    confs: list[float] = []
+    for s in range(n_slots):
+        slot = crop[:, s * slot_width : (s + 1) * slot_width]
+        if slot.size == 0:
+            frac = 0.0
+        else:
+            sat = _hsv(slot)[:, :, 1].astype(np.float32)
+            frac = float((sat > 40.0).mean())
+        fills.append(frac)
+        confs.append(float(1.0 - abs(frac - 0.5) / 0.5))
+    return fills, float(np.mean(confs) if confs else 0.0)
+
+
+def _sprite_regions(frame: np.ndarray, positions: list[tuple[float, float]]) -> list[np.ndarray]:
+    """Crop a region around each normalized position for sprite-looking reads.
+
+    Ragdoll and ultimate states have no HUD widget; both must be inferred from
+    the character sprite itself, so each call grabs a bounded crop around the
+    detected blob center instead of a fixed region.
+    """
+    crops = []
+    for px, py in positions:
+        cx, cy = int(px * W), int(py * H)
+        r = PLAYER_SPRITE_RADIUS * SPRITE_SEARCH_RADIUS
+        crop = crop_region(frame, (cx - r, cy - r, 2 * r, 2 * r))
+        if crop.size == 0:
+            crops.append(None)
+        else:
+            crops.append(crop)
+    return crops
+
+
+def _sprite_hue_mask(hsv: np.ndarray) -> np.ndarray:
+    """Mask pixels in the two character colour families (green player, red enemy).
+
+    Both the ragdoll and ultimate readers look at the *character silhouette*,
+    so the mask keeps only saturated team-coloured pixels: green (hue 35-100)
+    for the player and red (hue <= 12 or >= 168) for enemies. This excludes
+    HUD clutter and the magenta ultimate aura from the silhouette reading.
+    """
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    green = (hue >= 35) & (hue <= 100) & (sat > 80) & (val > 80)
+    red = ((hue <= 12) | (hue >= 168)) & (sat > 80) & (val > 80)
+    return (green | red).astype(np.uint8) * 255
+
+
+def read_sprite_ragdoll(
+    frame: np.ndarray, positions: list[tuple[float, float]]
+) -> tuple[list[bool], list[float]]:
+    """Best-effort ragdoll read: a fallen character is a wide, low sprite.
+
+    Roblox ragdolls collapse onto the ground, so the sprite's colour blob
+    becomes wider than tall. Returns ``(per_position_flags, confidences)``;
+    confidence drops when the blob is too small or too round to judge.
+    """
+    flags: list[bool] = []
+    confs: list[float] = []
+    for crop in _sprite_regions(frame, positions):
+        if crop is None or crop.size == 0:
+            flags.append(False)
+            confs.append(0.0)
+            continue
+        mask = _sprite_hue_mask(_hsv(crop))
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            flags.append(False)
+            confs.append(0.0)
+            continue
+        blob = max(contours, key=cv2.contourArea)
+        _x, _y, w, h = cv2.boundingRect(blob)
+        # Solidity: how much of the blob's own bounding box is filled (noisy
+        # multi-lobed shapes are rejected, but sprites are near-solid).
+        if w == 0 or h == 0:
+            flags.append(False)
+            confs.append(0.0)
+            continue
+        solidity = cv2.contourArea(blob) / (w * h)
+        if solidity < RAGDOLL_MIN_SOLIDITY:
+            flags.append(False)
+            confs.append(0.0)
+            continue
+        aspect = w / h
+        # Fallen ~wide (aspect well above 1); upright ~tall (aspect ~ 0.5-0.9).
+        is_ragdoll = aspect >= RAGDOLL_ASPECT_RATIO
+        # Confidence scales with how far the aspect is from the *other* shape.
+        distance = aspect if is_ragdoll else RAGDOLL_ASPECT_RATIO - aspect
+        conf = float(min(1.0, max(0.0, distance / RAGDOLL_ASPECT_RATIO)))
+        flags.append(is_ragdoll)
+        confs.append(conf)
+    return flags, confs
+
+
+def read_ultimate_aura(
+    frame: np.ndarray, positions: list[tuple[float, float]]
+) -> tuple[list[bool], list[float]]:
+    """Best-effort ultimate read: high-invulnerability states flare the aura.
+
+    JJK ultimates envelop the character in a magenta aura ring, so the sprite
+    crop gains a saturated halo outside the team-coloured silhouette. Returns
+    ``(flags, confidences)`` (confidence = halo coverage / decision threshold).
+    """
+    flags: list[bool] = []
+    confs: list[float] = []
+    for crop in _sprite_regions(frame, positions):
+        if crop is None or crop.size == 0:
+            flags.append(False)
+            confs.append(0.0)
+            continue
+        hsv = _hsv(crop)
+        sat = hsv[:, :, 1].astype(np.float32)
+        val = hsv[:, :, 2].astype(np.float32)
+        # Magenta aura (OpenCV hue 120..165) is distinct from the team colours.
+        hue = hsv[:, :, 0].astype(np.float32)
+        aura_band = (hue >= 120) & (hue <= 165)
+        alive = (sat > ULTIMATE_AURA_SAT_MIN) & (val > ULTIMATE_AURA_VAL_MIN)
+        coverage = float((aura_band & alive).mean())
+        active = coverage > ULTIMATE_AURA_COVERAGE
+        conf = float(min(1.0, coverage / ULTIMATE_AURA_COVERAGE))
+        flags.append(active)
+        confs.append(conf)
+    return flags, confs
+
+
+def read_domain_state(frame: np.ndarray) -> tuple[bool, bool, float]:
+    """Best-effort domain read: the arena is draped in a dark purple tint.
+
+    When a domain deploys the whole arena gets a purple overlay (its dome),
+    beginning mid-frame while the dome sweeps in. ``domain_active`` = the tint
+    covers most of the frame; ``domain_activating`` = a partial sweep is
+    underway. Returns ``(active, activating, confidence)``.
+    """
+    if frame.size == 0:
+        return False, False, 0.0
+    hsv = _hsv(frame)
+    hue = hsv[:, :, 0].astype(np.float32)
+    sat = hsv[:, :, 1].astype(np.float32)
+    val = hsv[:, :, 2].astype(np.float32)
+    purple = ((hue >= 120) & (hue <= 165) & (sat > 30) & (val > 25) & (val < 160)).astype(
+        np.float32
+    )
+    tint_frac = float(purple.mean())
+
+    active = tint_frac > DOMAIN_TINT_MIN
+    activating = (tint_frac > DOMAIN_TINT_ACTIVATING) & (tint_frac <= DOMAIN_TINT_MIN)
+    conf = float(min(1.0, tint_frac / DOMAIN_TINT_MIN))
+    return active, activating, conf
+
+
 def read_state_dot(frame: np.ndarray, bbox: tuple[int, int, int, int]) -> tuple[bool, bool]:
     """Read the grounded HUD state dot: yellow -> attacking, blue -> defending."""
     dot = crop_region(frame, bbox)
@@ -397,14 +581,33 @@ def classify_frame(
     attacking, defending = read_state_dot(frame, STATE_DOT_REGION)
     damage_flash = read_damage_flash(frame, DAMAGE_FLASH_REGION)
     ready, ability_conf = read_ability_indicators(frame, ABILITY_ROW_REGION)
+    cooldown_fills, cooldown_conf = read_ability_cooldowns(frame, ABILITY_ROW_REGION)
     domain_ready = bool(all(ready))
+
+    enemy_healths = [float(e["health"]) for e in enemies]
+    mean_enemy_health = float(np.mean(enemy_healths)) if enemy_healths else 0.0
+    health_ratio = player_health / (mean_enemy_health + 1e-12)
+
+    # Best-effort sprite/domain states (no dedicated HUD widget): positions are
+    # the raw blob centers scaled back to px for the sprite-region readers.
+    enemy_sprite_positions = []
+    for e in enemies:
+        bx, by, bw, bh = (float(v) for v in e["bbox"])
+        enemy_sprite_positions.append(((bx + bw / 2.0) / W, (by + bh / 2.0) / H))
+    sprite_positions = [player_position] + enemy_sprite_positions
+
+    player_ragdoll, ragdoll_conf = read_sprite_ragdoll(frame, sprite_positions[:1])
+    enemy_ragdoll, _ = read_sprite_ragdoll(frame, sprite_positions[1:])
+    player_ultimate, ultimate_conf = read_ultimate_aura(frame, sprite_positions[:1])
+    enemy_ultimate, _ = read_ultimate_aura(frame, sprite_positions[1:])
+    domain_active, domain_activating, domain_conf = read_domain_state(frame)
 
     # There is no round clock in regular game modes (Jujutsu Shenanigans
     # duels have none), so the clock region is not a Silver feature: we never
     # OCR it, never warn about it, and exclude it from OCR confidence.
     clock_sec = None
 
-    confs = [health_conf, ability_conf]
+    confs = [health_conf, ability_conf, cooldown_conf, domain_conf]
     min_conf = float(np.min(confs))
     if min_conf < warn_threshold:
         warnings.append(f"low OCR confidence {min_conf:.2f}")
@@ -425,6 +628,20 @@ def classify_frame(
         ocr_confidence=min_conf,
         round_index=0,
         warnings=warnings,
+        health_ratio=health_ratio,
+        ability_cooldowns=cooldown_fills,
+        num_abilities_ready=int(sum(f >= 0.25 for f in cooldown_fills)),
+        player_ragdoll=bool(player_ragdoll[0]),
+        enemy_ragdoll=bool(any(enemy_ragdoll)),
+        player_ultimate=bool(player_ultimate[0]),
+        enemy_ultimate=bool(any(enemy_ultimate)),
+        domain_active=domain_active,
+        domain_activating=domain_activating,
+        feature_confidences={
+            "player_ragdoll": float(ragdoll_conf[0]),
+            "player_ultimate": float(ultimate_conf[0]),
+            "domain": float(domain_conf),
+        },
     )
 
 
@@ -607,6 +824,35 @@ def _draw_damage_flash(img: np.ndarray, active: bool) -> None:
     cv2.rectangle(img, (x, y), (x + w, y + h), _FLASH_RED, -1)
 
 
+def _draw_ragdoll_sprite(
+    img: np.ndarray, cx: int, cy: int, radius: int, color: tuple[int, int, int], ragdoll: bool
+) -> None:
+    """Draw a character sprite: upright circle or fallen wide-ellipse ragdoll."""
+    if ragdoll:
+        cv2.ellipse(img, (cx, cy), (int(radius * 1.6), int(radius * 0.45)), 0, 0, 360, color, -1)
+    else:
+        cv2.circle(img, (cx, cy), radius, color, -1)
+
+
+def _draw_ultimate_aura(
+    img: np.ndarray, cx: int, cy: int, radius: int, active: bool
+) -> None:
+    """Saturated aura around the sprite when the ultimate state is on."""
+    if not active:
+        return
+    # Aura is a translucent halo around the character so the sprite stays
+    # visible (and its colour readable) while the halo saturates. Purple
+    # (hue ~135) is distinct from player green (~70) and enemy red (~1).
+    h, w = img.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.circle(mask, (cx, cy), int(radius * 1.5), 255, -1)
+    halo = img.copy()
+    halo[mask > 0] = (175, 70, 255)
+    img[:] = cv2.addWeighted(img, 0.6, halo, 0.4, 0)
+    # Sharp saturated rim so the aura reads strongly at the halo edge.
+    cv2.circle(img, (cx, cy), int(radius * 1.35), (255, 60, 255), 5)
+
+
 def render_frame_and_state(
     player_health: float = 1.0,
     enemy_healths: list[float] | None = None,
@@ -617,12 +863,20 @@ def render_frame_and_state(
     ability_ready: list[bool] | None = None,
     clock_sec: float = 60.0,
     seed: int | None = None,
+    player_ragdoll: bool = False,
+    enemy_ragdoll: bool = False,
+    player_ultimate: bool = False,
+    enemy_ultimate: bool = False,
+    domain_active: bool = False,
+    cooldown_fills: list[float] | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Deterministically render a synthetic HUD frame + its ground-truth state.
 
     The returned (frame, state) pair feeds both the classifier tests (does the
     heuristic read match the ground truth?) and the CNN training path. With a
-    fixed seed every sprite position and flag is reproducible.
+    fixed seed every sprite position and flag is reproducible. The extended
+    flags (ragdoll, ultimate, domain, cooldown fills) drive the best-effort
+    sprite heuristics.
     """
     rng = random.Random(seed)
     nrng = np.random.default_rng(seed)
@@ -634,23 +888,31 @@ def render_frame_and_state(
         domain_ready = bool(all(ability_ready))
     elif ability_ready is None:
         ability_ready = [bool(domain_ready)] * ABILITY_SLOTS
+    if cooldown_fills is None:
+        cooldown_fills = [1.0 if on else 0.0 for on in ability_ready]
 
     frame = _new_frame()
+    if domain_active:
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (W, H), (90, 45, 150), -1)
+        frame = cv2.addWeighted(overlay, 0.5, frame, 0.5, 0)
     _draw_health_bar(frame, PLAYER_HEALTH_BAR, player_health, low_health=player_health < 0.3)
     _draw_health_bar(frame, ENEMY_HEALTH_BAR, float(np.mean(enemy_healths)))
     _draw_clock(frame, clock_sec)
     _draw_state_dot(frame, attacking, defending)
-    _draw_ability_row(frame, ability_ready)
+    _draw_ability_row(frame, [f >= 0.25 for f in cooldown_fills])
     _draw_damage_flash(frame, damaged)
 
     r = PLAYER_SPRITE_RADIUS
     px, py = W // 2, H - 170
-    cv2.circle(frame, (px, py), r, _PLAYER_GREEN, -1)
+    _draw_ultimate_aura(frame, px, py, r, player_ultimate)
+    _draw_ragdoll_sprite(frame, px, py, r, _PLAYER_GREEN, player_ragdoll)
     enemy_centers = [
         (int(nrng.uniform(0.3, 0.7) * W), int(nrng.uniform(0.3, 0.5) * H)) for _ in enemy_healths
     ]
-    for ex, ey in enemy_centers:
-        cv2.circle(frame, (ex, ey), r, _ENEMY_RED, -1)
+    for i, (ex, ey) in enumerate(enemy_centers):
+        _draw_ultimate_aura(frame, ex, ey, r, enemy_ultimate and i == 0)
+        _draw_ragdoll_sprite(frame, ex, ey, r, _ENEMY_RED, enemy_ragdoll and i == 0)
 
     state = {
         "player_health": player_health,
@@ -669,6 +931,12 @@ def render_frame_and_state(
         "damage_indicator": damaged,
         "num_enemies": len(enemy_healths),
         "domain_ready": domain_ready,
+        "cooldown_fills": cooldown_fills,
+        "player_ragdoll": player_ragdoll,
+        "enemy_ragdoll": enemy_ragdoll,
+        "player_ultimate": player_ultimate,
+        "enemy_ultimate": enemy_ultimate,
+        "domain_active": domain_active,
         "clock_sec": clock_sec,
     }
     return frame, state
@@ -787,11 +1055,15 @@ __all__ = [
     "identify_player_and_enemies",
     "process_frames",
     "process_image",
+    "read_ability_cooldowns",
     "read_ability_indicators",
     "read_clock_ocr",
     "read_damage_flash",
+    "read_domain_state",
     "read_health_fill",
+    "read_sprite_ragdoll",
     "read_state_dot",
+    "read_ultimate_aura",
     "render_frame_and_state",
     "render_synthetic_frame",
     "simulate_match",
