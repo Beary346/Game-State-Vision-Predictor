@@ -229,7 +229,7 @@ function renderFrameList() {
     idx.className = "idx";
     idx.textContent = stateMeta(stem);
     row.append(dot, name, idx);
-    row.addEventListener("click", () => select({ stem }));
+    row.addEventListener("click", () => openFrame(stem));
     box.appendChild(row);
   }
   markCurrent();
@@ -454,7 +454,7 @@ document.getElementById("filter").addEventListener("click", (e) => {
 });
 
 const openFirstUnlabeled = async () => {
-  const d = await json("/api/frames?status=todo&offset=0&limit=1");
+  const d = await json("/api/frames?status=unlabeled&offset=0&limit=1");
   if (d.stems.length) openFrame(d.stems[0]);
 };
 
