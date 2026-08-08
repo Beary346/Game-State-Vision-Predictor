@@ -64,8 +64,8 @@ uvicorn app.labeler:app --port 8765        # open http://127.0.0.1:8765
 ```
 
 ## **Game-State-Vision-Predictor Labeling Example:**
+<img width="1007" height="1024" alt="image" src="https://github.com/user-attachments/assets/b60a0933-d386-45b4-a0c1-86496c4b2d68" />
 
-<img width="1254" height="1390" alt="image" src="https://github.com/user-attachments/assets/0ed2f1e9-a2d6-47ae-aa5f-454a7a468d1a" />
 
 **Keyboard shortcuts:** `1/2/3/4/5/6` → winning / losing / stalemate / searching / won / lost, `s` skip (out-of-distribution), `x` exclude from training, `u` undo, `n`/`p` next/previous, `e` export. Filling a label auto-advances to the next unlabeled frame.
 
