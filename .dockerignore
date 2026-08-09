@@ -1,0 +1,28 @@
+# Keep the build context small: only source + requirements ever reach the
+# builder. data/, outputs/, models/, mlruns/ are volumes / bind mounts.
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.ipynb_checkpoints
+
+data
+outputs
+models
+mlruns
+notebooks
+tests
+docs
+.run
+.vscode
+.idea
+
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md
+AGENTS.md
+labels.csv

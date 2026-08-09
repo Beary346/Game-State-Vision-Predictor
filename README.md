@@ -136,6 +136,20 @@ report = infer_new_vod("data/videos/fresh_match.mp4")
 | MLflow UI | `mlflow ui --backend-store-uri sqlite:///mlruns/mlflow.db` |
 | Silver CNN (later milestone) | `python -m src.pipeline.silver_train --synthetic 200 --epochs 50` |
 
+## Running with Docker
+
+Everything above (label review, training, MLflow UI) also runs containerized:
+
+```bash
+docker compose up -d                      # MLflow UI :5000 + label review :8765
+# label frames in the browser, then:
+docker compose --profile training run --rm training   # train + register state_reader
+# open http://127.0.0.1:5000 -> gold_classifier leaderboard + Model Registry
+```
+
+- Labels live in `./data` (bind mount) — the training job reads exactly what you labeled.
+- MLflow runs and artifacts persist in the `mlflow-mlruns` / `mlflow-artifacts` volumes (same store the app and training job share via the `mlflow` service).
+
 ## Running the tests
 
 ```bash

@@ -1,0 +1,64 @@
+# Game State Vision Predictor — local ML stack
+#
+#   docker compose up -d              # MLflow UI (:5000) + label-review app (:8765)
+#   docker compose --profile training run --rm training   # one-shot Gold training job
+#
+# The Gold training job writes every run into the mlflow-server backend store
+# and artifact volume; the state-reader it registers (--register-best) is
+# viewable in the MLflow UI's Model Registry.
+services:
+  mlflow:
+    build: .
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlruns/mlflow.db
+      --default-artifact-root /mlartifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-mlruns:/mlruns      # tracking DB (experiments + model registry)
+      - mlflow-artifacts:/mlartifacts  # run artifacts: models, timelines, stat cards
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # Label-review web app (app/labeler.py) — writes labels into ./data/gold
+  # on the host, so the training job sees them.
+  app:
+    build: .
+    command: uvicorn app.labeler:app --host 0.0.0.0 --port 8765
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+  # One-shot training job: race the model zoo, register the winner as the
+  # Production state-reader. Run with:
+  #   docker compose --profile training run --rm training
+  training:
+    build: .
+    profiles: ["training"]
+    command: python -m src.pipeline.gold --data-root data/gold --register-best
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+volumes:
+  mlflow-mlruns:
+  mlflow-artifacts:
