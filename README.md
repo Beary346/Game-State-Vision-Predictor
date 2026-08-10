@@ -2,7 +2,7 @@
 
 Detect and predict **game state** from fighting-game footage. Upload a match VOD and receive a quantified match report — the match report your eye can't compute.
 
-The pipeline reads raw **Jujutsu Shenanigans (Roblox)** recordings (1920×1080 desktop resolution), extracts HUD-grounded features per frame (health, aggression, defense), and classifies every moment into plain-English initiative states. A single screenshot works too — the zero-friction demo path.
+The pipeline I set up reads raw **Jujutsu Shenanigans (Roblox)** recordings (1920×1080 desktop resolution), extracts HUD-grounded features per frame (health, aggression, defense), and classifies every moment into plain-English initiative states. A single screenshot works too — the zero-friction demo path.
 
 ## See it in action
 
