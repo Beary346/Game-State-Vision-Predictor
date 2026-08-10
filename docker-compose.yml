@@ -9,6 +9,7 @@
 services:
   mlflow:
     build: .
+    image: gamestatevisionpredictor:latest
     command: >
       mlflow server
       --host 0.0.0.0
@@ -31,6 +32,7 @@ services:
   # on the host, so the training job sees them.
   app:
     build: .
+    image: gamestatevisionpredictor:latest
     command: uvicorn app.labeler:app --host 0.0.0.0 --port 8765
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
@@ -47,6 +49,7 @@ services:
   #   docker compose --profile training run --rm training
   training:
     build: .
+    image: gamestatevisionpredictor:latest
     profiles: ["training"]
     command: python -m src.pipeline.gold --data-root data/gold --register-best
     environment:

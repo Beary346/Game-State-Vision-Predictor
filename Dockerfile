@@ -18,8 +18,12 @@ WORKDIR /app
 RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.1.0"
 
 # Then the declared project stack (ml + viz + workflow requirements; base.txt
-# also carries fastapi/uvicorn for the label-review app).
-COPY requirements.txt requirements/ ./
+# also carries fastapi/uvicorn for the label-review app). Two separate COPYs:
+# a directory source copies its CONTENTS flat into the destination, so copying
+# requirements/ as its own subdirectory preserves the structure that
+# `pip install -r requirements.txt` expects for the nested -r includes.
+COPY requirements.txt ./
+COPY requirements ./requirements
 RUN pip install -r requirements.txt
 
 # Application code. data/ is intentionally NOT copied: it is bind-mounted from
