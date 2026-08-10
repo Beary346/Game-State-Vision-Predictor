@@ -202,5 +202,12 @@ ruff check .    # lint
 <!-- FUTURE IMAGE: Timeline plot from a VOD report (gold_vod_report artifacts).
 <img width="1254" height="1390" alt="Sample match timeline" src="https://github.com/user-attachments/assets/00000000-0000-0000-0000-000000000000" /> -->
 
-<!-- FUTURE IMAGE: MLflow leaderboard (gold_classifier — accuracy / F1 comparison).
-<img width="1254" height="1390" alt="MLflow leaderboard" src="https://github.com/user-attachments/assets/00000000-0000-0000-0000-000000000000" /> -->
+**Gold run #1 — the baseline leaderboard.** The first full model-zoo race on hand-labeled data: six models (logistic regression, random forest, gradient boosting, XGBoost, SVC, PyTorch MLP) trained on **280 hand-labeled frames** with **29 engineered features**. Gradient boosting tops the leaderboard at **0.75 macro-F1**.
+
+<img width="842" height="630" alt="Screenshot 2026-08-09 205959" src="https://github.com/user-attachments/assets/21e77df3-5068-49b8-ac15-3b70e756132f" />
+
+I believe this score is a floor, not the ceiling: 280 frames is only a modest slice of the 4,008-frame corpus I captured, so the models are still starved for examples of the rarer states (`losing`, `won`, `lost`). Every run after this one benefits from more labels behind it — at 500–1000 samples I expect the leaderboard to tighten and the top F1 to climb, since the labels themselves are human-confirmed.
+
+This run serves as the **baseline**: future runs race the same zoo with the same split and seed, and earn their place as the new Production `state_reader` only by beating it.
+
+<!-- FUTURE RUN: Gold run #2 (500–1000 labeled samples). Paste the new leaderboard screenshot here and compare against the baseline above — the story to tell is the delta: gradient boosting (or whoever takes the top slot) climbing past 0.75 macro-F1 as the dataset grows from 280 → 500+ frames. -->
