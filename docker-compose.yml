@@ -53,6 +53,9 @@ services:
   # One-shot training job: race the model zoo, register the winner as the
   # Production state-reader. Run with:
   #   docker compose --profile training run --rm training
+  # Match reports on unseen VODs (infer_new_vod) run in the same container:
+  #   docker compose --profile training run --rm training \
+  #     python -m src.pipeline.gold --infer-vod /app/data/videos/<match>.mp4
   training:
     build: .
     image: gamestatevisionpredictor:latest
@@ -62,6 +65,7 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
       - ./data:/app/data
+      - ./data/videos:/app/data/videos  # VODs for --infer-vod reports
       - ./models:/app/models
       - ./outputs:/app/outputs
     depends_on:
