@@ -11,6 +11,26 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# OpenCV's binary wheels link against X11/GUI system libraries; the slim base
+# image ships none of them, so `import cv2` (bronze/silver/gold all use it)
+# fails on libxcb.so.1 etc. Install the small glib/X11 set they resolve
+# against. All the actual image work happens headless -- no display needed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libxcb1 \
+        libx11-6 \
+        libxrandr2 \
+        libxfixes3 \
+        libxi6 \
+        libxxf86vm1 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install CPU-only PyTorch BEFORE the project requirements: the default PyPI
 # torch wheel bundles CUDA (~2.6 GB) which Gold training and inference never
 # need. Installing torch first satisfies the torch>=2.1.0 pin in
