@@ -167,7 +167,19 @@ docker compose --profile training run --rm training   # train + register state_r
 # open http://127.0.0.1:5000 -> gold_classifier leaderboard + Model Registry
 ```
 
+**VOD in, report out** (no rebuild needed — `./data` is bind-mounted):
+
+```bash
+cp your_match.mp4 data/videos/                    # drop footage on the host
+docker compose --profile training run --rm training \
+  python -m src.pipeline.gold --infer-vod /app/data/videos/your_match.mp4
+# prints score + headline stats, then leaves the report at:
+#   outputs/gold_<name>/timeline.json + stat_card.png  (./outputs bind mount)
+# and logs it as an MLflow run under the gold_vod_report experiment (MLflow UI :5000)
+```
+
 - Labels live in `./data` (bind mount) — the training job reads exactly what you labeled.
+- VODs for reports are dropped into `data/videos/` (also bind-mounted, world-writable).
 - MLflow runs and artifacts persist in the `mlflow-mlruns` / `mlflow-artifacts` volumes (same store the app and training job share via the `mlflow` service).
 
 ## Running the tests
