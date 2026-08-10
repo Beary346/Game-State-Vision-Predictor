@@ -2,7 +2,25 @@
 
 Detect and predict **game state** from fighting-game footage. Upload a match VOD and receive a quantified match report — the match report your eye can't compute.
 
-The pipeline I created reads raw **Jujutsu Shenanigans (Roblox)** recordings (1920×1080 desktop resolution), extracts HUD-grounded features per frame (health, aggression, defense), and classifies every moment into plain-English initiative states. A single screenshot works too — the zero-friction demo path.
+The pipeline reads raw **Jujutsu Shenanigans (Roblox)** recordings (1920×1080 desktop resolution), extracts HUD-grounded features per frame (health, aggression, defense), and classifies every moment into plain-English initiative states. A single screenshot works too — the zero-friction demo path.
+
+## See it in action
+
+**Label review** — the human-in-the-loop tool that turns raw frames into hand-verified training data:
+
+<img width="1007" height="1024" alt="Labeling UI" src="https://github.com/user-attachments/assets/b60a0933-d386-45b4-a0c1-86496c4b2d68" />
+
+**Gold run #1 — the baseline leaderboard.** The first full model-zoo race on hand-labeled data: six models (logistic regression, random forest, gradient boosting, XGBoost, SVC, PyTorch MLP) trained on **280 hand-labeled frames** with **29 engineered features**. Gradient boosting tops the leaderboard at **0.75 macro-F1**.
+
+<img width="842" height="630" alt="MLflow leaderboard — Gold run #1" src="https://github.com/user-attachments/assets/21e77df3-5068-49b8-ac15-3b70e756132f" />
+
+I believe this score is a floor, not the ceiling: 280 frames is only a modest slice of the 4,008-frame corpus I captured, so the models are still starved for examples of the rarer states (`losing`, `won`, `lost`). Every run after this one benefits from more labels behind it — at 500–1000 samples I expect the leaderboard to tighten and the top F1 to climb, since the labels themselves are human-confirmed.
+
+This run serves as the **baseline**: future runs race the same zoo with the same split and seed, and earn their place as the new Production `state_reader` only by beating it.
+
+<!-- FUTURE RUN: Gold run #2 (500–1000 labeled samples). Paste the new leaderboard screenshot here and compare against the baseline above — the story to tell is the delta: gradient boosting (or whoever takes the top slot) climbing past 0.75 macro-F1 as the dataset grows from 280 → 500+ frames. -->
+
+---
 
 ## How it works
 
@@ -25,6 +43,8 @@ Pixels  ──►  Clean Pixels  ──►  Game Features  ──►  State Labe
 - **Hit / whiff stats and damage-by-round breakdown**
 - **A downloadable stat card** with a headline **score** (timeline plot + headline stats), built with PIL and readable at screen-share zoom
 - Every processed VOD becomes an **MLflow run** with params, metrics, and artifacts (timeline JSON + stat card)
+
+---
 
 ## Getting started
 
@@ -63,10 +83,6 @@ python -m src.pipeline.labeling --init     # one empty scaffold per Silver JSON
 uvicorn app.labeler:app --port 8765        # open http://127.0.0.1:8765
 ```
 
-## **Game-State-Vision-Predictor Labeling Example:**
-<img width="1007" height="1024" alt="image" src="https://github.com/user-attachments/assets/b60a0933-d386-45b4-a0c1-86496c4b2d68" />
-
-
 **Keyboard shortcuts:** `1/2/3/4/5/6` → winning / losing / stalemate / searching / won / lost, `s` skip (out-of-distribution), `x` exclude from training, `u` undo, `n`/`p` next/previous, `e` export. Filling a label auto-advances to the next unlabeled frame.
 
 When Silver misreads a frame, fix it directly in the UI: adjust the `silver_override` values (e.g. `player_health`) — the rule label refreshes instantly and training consumes the correction, while `labels.csv` remains the single source of truth.
@@ -91,6 +107,8 @@ data/videos/*.mp4 ──①──► data/silver/*_bronze.png ──②──►
 ```
 
 ①、② rerun only when you add new VODs; ③→⑥ repeat as you label more.
+
+---
 
 ## Train & run the state-reader
 
@@ -136,6 +154,8 @@ report = infer_new_vod("data/videos/fresh_match.mp4")
 | MLflow UI | `mlflow ui --backend-store-uri sqlite:///mlruns/mlflow.db` |
 | Silver CNN (later milestone) | `python -m src.pipeline.silver_train --synthetic 200 --epochs 50` |
 
+---
+
 ## Running with Docker
 
 Everything above (label review, training, MLflow UI) also runs containerized:
@@ -156,6 +176,8 @@ docker compose --profile training run --rm training   # train + register state_r
 pytest          # bronze, silver, gold, events, report, registry, labeling
 ruff check .    # lint
 ```
+
+---
 
 ## Project layout
 
@@ -192,22 +214,16 @@ ruff check .    # lint
 - `docs/design.md` — the what, the why, and the trade-offs behind every major decision
 - `docs/data_collection_plan.md` — the human loop: capturing, labeling, training, and the target dataset
 
+## Tools & acknowledgments
+
+Built with **OpenCode** as an AI coding assistant. The architecture and guidance skills behind this project were learned from the **Databricks** documentation, the **NVIDIA** documentation, and personal experience in machine-learning competitions.
+
 ---
 
-## Screenshots
+## Future screenshots
 
 <!-- FUTURE IMAGE: Downloadable stat card (outputs/gold_<name>/stat_card.png).
 <img width="1254" height="1390" alt="Sample stat card" src="https://github.com/user-attachments/assets/00000000-0000-0000-0000-000000000000" /> -->
 
 <!-- FUTURE IMAGE: Timeline plot from a VOD report (gold_vod_report artifacts).
 <img width="1254" height="1390" alt="Sample match timeline" src="https://github.com/user-attachments/assets/00000000-0000-0000-0000-000000000000" /> -->
-
-**Gold run #1 — the baseline leaderboard.** The first full model-zoo race on hand-labeled data: six models (logistic regression, random forest, gradient boosting, XGBoost, SVC, PyTorch MLP) trained on **280 hand-labeled frames** with **29 engineered features**. Gradient boosting tops the leaderboard at **0.75 macro-F1**.
-
-<img width="842" height="630" alt="Screenshot 2026-08-09 205959" src="https://github.com/user-attachments/assets/21e77df3-5068-49b8-ac15-3b70e756132f" />
-
-I believe this score is a floor, not the ceiling: 280 frames is only a modest slice of the 4,008-frame corpus I captured, so the models are still starved for examples of the rarer states (`losing`, `won`, `lost`). Every run after this one benefits from more labels behind it — at 500–1000 samples I expect the leaderboard to tighten and the top F1 to climb, since the labels themselves are human-confirmed.
-
-This run serves as the **baseline**: future runs race the same zoo with the same split and seed, and earn their place as the new Production `state_reader` only by beating it.
-
-<!-- FUTURE RUN: Gold run #2 (500–1000 labeled samples). Paste the new leaderboard screenshot here and compare against the baseline above — the story to tell is the delta: gradient boosting (or whoever takes the top slot) climbing past 0.75 macro-F1 as the dataset grows from 280 → 500+ frames. -->
